@@ -1,7 +1,9 @@
-// Minimap + full map for Fortuna Bay — live canvas, player-centred,
+// Minimap + full map for Fortuna Bay v2 — live canvas, player-centred,
 // north-up. Roads from the city grid, cops flashing, mission marker cyan,
-// player arrow white. Tab opens the full map.
-import { DISTRICTS, HALF, ISLAND, blockCenter } from './config.js';
+// player arrow white. Tab opens the full map. v2: FALCON-1 shows as a
+// rotating rotor blip with its searchlight pool, and a cyan GPS route line
+// runs along the roads to the mission target.
+import { DISTRICTS, HALF, ISLAND, blockCenter, nearestRoad } from './config.js';
 
 export function createMinimap(G) {
   const { state } = G;
@@ -58,7 +60,40 @@ export function createMinimap(G) {
     ctx.fill();
   }
 
-  function drawMarkers(ctx, toPx) {
+  // GPS route: a dashed cyan line from the player to the mission marker,
+  // routed along the road grid (Manhattan path via the nearest road lines).
+  function drawRoute(ctx, toPx) {
+    const m = G.missions ? G.missions.marker : null;
+    if (!m) return;
+    const pp = playerPos();
+    const rx0 = nearestRoad(pp.x);
+    const rz0 = nearestRoad(pp.z);
+    const rx1 = nearestRoad(m[0]);
+    const rz1 = nearestRoad(m[1]);
+    const waypoints = [
+      [pp.x, pp.z],
+      [rx0, pp.z],
+      [rx0, rz1],
+      [rx1, rz1],
+      [m[0], m[1]],
+    ];
+    // Drop duplicate consecutive points (player already on a road line).
+    const pts = waypoints.filter((p, i) => i === 0 || Math.hypot(p[0] - waypoints[i - 1][0], p[1] - waypoints[i - 1][1]) > 1);
+    ctx.save();
+    ctx.strokeStyle = '#44d0ff';
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([7, 5]);
+    ctx.beginPath();
+    pts.forEach(([x, z], i) => {
+      const [px, py] = toPx(x, z);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawMarkers(ctx, toPx, scale) {
     // Mission marker (cyan diamond).
     const m = G.missions ? G.missions.marker : null;
     if (m) {
@@ -69,6 +104,17 @@ export function createMinimap(G) {
     const safe = G.city.landmarks.safehouse;
     const [sx, sy] = toPx(safe.x, safe.z);
     drawDiamond(ctx, sx, sy, 5, '#44d060');
+    // Helipads (yellow H) on the full map only — the minimap scale is
+    // ~0.71, the full map ~0.58, so 0.65 separates the two.
+    if (G.city.helipads && scale < 0.65) {
+      ctx.fillStyle = '#ffcc22';
+      ctx.font = 'bold 11px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      for (const pad of G.city.helipads) {
+        const [px, py] = toPx(pad.x, pad.z);
+        ctx.fillText('H', px, py + 4);
+      }
+    }
     // Cops (flashing red/blue).
     const copColor = Math.floor(clock * 3) % 2 === 0 ? '#ff4444' : '#4488ff';
     ctx.fillStyle = copColor;
@@ -77,6 +123,34 @@ export function createMinimap(G) {
       ctx.beginPath();
       ctx.arc(cx, cy, 3, 0, Math.PI * 2);
       ctx.fill();
+    }
+    // FALCON-1: a rotating rotor blip (yellow) + its searchlight pool.
+    if (G.police && G.police.heliPos) {
+      const h = G.police.heliPos();
+      const pool = G.police.spotPool ? G.police.spotPool() : null;
+      if (pool) {
+        const [px, py] = toPx(pool.x, pool.z);
+        ctx.fillStyle = 'rgba(255,242,176,0.35)';
+        ctx.beginPath();
+        ctx.arc(px, py, Math.max(3, pool.r * scale), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (h) {
+        const [hx, hy] = toPx(h.x, h.z);
+        const a = clock * 6;
+        ctx.strokeStyle = '#ffcc22';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(hx - Math.cos(a) * 7, hy - Math.sin(a) * 7);
+        ctx.lineTo(hx + Math.cos(a) * 7, hy + Math.sin(a) * 7);
+        ctx.moveTo(hx - Math.cos(a + Math.PI / 2) * 7, hy - Math.sin(a + Math.PI / 2) * 7);
+        ctx.lineTo(hx + Math.cos(a + Math.PI / 2) * 7, hy + Math.sin(a + Math.PI / 2) * 7);
+        ctx.stroke();
+        ctx.fillStyle = '#ffcc22';
+        ctx.beginPath();
+        ctx.arc(hx, hy, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     // Enemies (solid red dots) so kill missions stay findable.
     if (G.combat) {
@@ -99,10 +173,13 @@ export function createMinimap(G) {
     const w = mini.width;
     const h = mini.height;
     const pp = playerPos();
+    // 280 m across the 200 px circle: the minimap shows the neighbourhood,
+    // not the whole island (that is what the full map is for).
     const scale = w / 280; // 280 m across
     const toPx = (x, z) => [w / 2 + (x - pp.x) * scale, h / 2 + (z - pp.z) * scale];
     drawBase(miniCtx, w, h, toPx, scale);
-    drawMarkers(miniCtx, toPx);
+    drawRoute(miniCtx, toPx);
+    drawMarkers(miniCtx, toPx, scale);
     // Player arrow (white, rotated to the heading).
     miniCtx.save();
     miniCtx.translate(w / 2, h / 2);
@@ -145,7 +222,8 @@ export function createMinimap(G) {
       fullCtx.arc(px, py, 3, 0, Math.PI * 2);
       fullCtx.fill();
     }
-    drawMarkers(fullCtx, toPx);
+    drawRoute(fullCtx, toPx);
+    drawMarkers(fullCtx, toPx, scale);
     // Player arrow.
     const pp = playerPos();
     const [px, py] = toPx(pp.x, pp.z);
