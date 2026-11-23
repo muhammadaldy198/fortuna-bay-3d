@@ -1,8 +1,12 @@
-// Screenshot + QA staging for Fortuna Bay (?shot=cover|city|chase|
-// mission|soak|systemstest). CRITICAL LESSON from Low Tide City: shot mode
+// Screenshot + QA staging for Fortuna Bay v2 (?shot=strip|night|chase|
+// scale|soak|systemstest). CRITICAL LESSON from Low Tide City: shot mode
 // AUTO-STARTS gameplay — the title screen never shows in a screenshot.
 // Every scene stages real game state (real cops, real missions, real HUD)
-// and the capture tool waits for window.__shotReady.
+// and the capture tool waits for window.__shotReady. v2: FALCON-1 is IN
+// FRAME in every shot — the v1 shots never showed the heli, because the
+// chase camera looks forward-down while the heli patrolled high behind.
+// The v2 heli TRACKs low ahead of the player, and each shot camera is
+// aimed at the heli (or the frame is composed to include it).
 import { ENEMY_HEALTH, PED_COUNT, TRAFFIC_COUNT } from './config.js';
 import { clearSave, defaultSave, loadSave, writeSave } from './save.js';
 
@@ -34,94 +38,132 @@ export function createShots(G) {
     G.police.setWanted(0);
   }
 
-  function stageCover() {
-    // The cover: a golden-hour chase. Player in a sport car downtown, 5
-    // stars, FALCON-1 overhead, a roadblock ahead, mission 5 running.
-    // The player DRIVES during the settle: a parked car lets the tail catch
-    // the camera (first capture had a cruiser filling the frame, speed 0).
-    const car = G.vehicles.spawnCar('sport', 0, -54, 0, { driver: null, color: 0xc84444 });
+  // Where FALCON-1 is right now (or a fallback above the player).
+  function heliPos() {
+    const h = G.police.heliPos ? G.police.heliPos() : null;
+    if (h) return h;
+    const pp = state.inCar && state.car ? state.car.pos : G.player.pos;
+    return { x: pp.x, z: pp.z, alt: 30 };
+  }
+
+  function stageStrip() {
+    // Shot 1 "FALCON-1 OVER THE STRIP": golden-hour hero. The player sits
+    // in a red sport car on the beachfront road, 3 stars, mission 11
+    // ("Out of the Light") running. The heli TRACKs low ahead of the car;
+    // the camera sits LOW (y 2.2) behind the car looking UP at the heli,
+    // so the heli lands upper-right on a rule-of-thirds point with the
+    // tower skyline behind it. The car stays parked — a moving car would
+    // outrun the heli's 26 m/s and leave it behind the frame.
+    G.weather.setTimeOfDay(19.33); // 19:20 golden hour
+    const car = G.vehicles.spawnCar('sport', 0, 324, Math.PI, { driver: null, color: 0xc84444 });
     G.vehicles.enterCar(car);
-    G.missions.startMission(5);
-    G.missions.jumpTo(1); // the evade step: "Lose the FBPD!"
-    G.police.setWanted(5);
-    G.input.setOverride({ x: 0, y: 0.7 }, []);
-    // Pull-back chase camera that follows the car and looks well ahead, so
-    // the roadblock and the converging cruisers stay in frame.
+    G.missions.startMission(10); // Out of the Light
+    G.police.setWanted(3);
     cameraFn = (camera) => {
       const c = state.car;
       if (!c) return;
-      const fx = Math.sin(c.yaw);
-      const fz = Math.cos(c.yaw);
-      camera.position.set(c.pos.x - fx * 10, 4.5, c.pos.z - fz * 10);
-      camera.lookAt(c.pos.x + fx * 25, 2, c.pos.z + fz * 25);
+      const h = heliPos();
+      camera.position.set(c.pos.x - 7, 2.2, c.pos.z + 9);
+      camera.lookAt(h.x, h.alt, h.z);
     };
-    settleLeft = 150;
+    settleLeft = 300; // 5 s: patrol (3 s) -> track low ahead
   }
 
-  function stageCity() {
-    // On foot on the boardwalk at dusk: skyline, peds, traffic, marina.
-    G.player.setPos(0, 396, Math.PI);
-    // Stage 8 peds at fixed boardwalk spots (deterministic — the old version
-    // drew random points and kept only the ones that happened to land near,
-    // which could stage nobody on a bad draw).
+  function stageNight() {
+    // Shot 2 "SEARCHLIGHT NIGHT": 22:00, the player on foot at Ocean Plaza,
+    // 3 stars, the heli hovering in front sweeping its spotlight. Emissive
+    // windows glow, the volumetric cone cuts the dark, the pool lights the
+    // plaza. Peds cower under the rotor wash. Camera low behind the player,
+    // framed between the player and the heli.
+    G.weather.setTimeOfDay(22);
+    G.player.setPos(-135, 297, Math.PI);
+    // Stage 6 peds around the plaza so the wash has someone to scare.
     const pedSpots = [
-      [-24, 384], [-12, 402], [8, 388], [18, 404], [-6, 378],
-      [28, 390], [-34, 396], [40, 402],
+      [-128, 290], [-142, 304], [-120, 300], [-150, 292], [-135, 310], [-125, 312],
     ];
-    G.peds.peds.slice(0, 8).forEach((ped, i) => {
+    G.peds.peds.slice(0, 6).forEach((ped, i) => {
       ped.x = pedSpots[i][0];
       ped.z = pedSpots[i][1];
     });
-    for (let i = 0; i < 3; i++) {
-      G.vehicles.spawnCar('civil', -30 + i * 30, 360, Math.PI / 2, { driver: null });
-    }
-    settleLeft = 60;
+    G.police.setWanted(3);
+    cameraFn = (camera) => {
+      const p = G.player.pos;
+      const h = heliPos();
+      camera.position.set(p.x - 5, 2.6, p.z + 8);
+      // Aim between the heli and its pool so both read in the frame.
+      camera.lookAt((h.x + p.x) / 2, h.alt * 0.55, (h.z + p.z) / 2);
+    };
+    settleLeft = 300;
   }
 
   function stageChase() {
-    // High-angle drift shot: the player car sliding past a roadblock,
-    // heli searchlight sweeping the road, skid marks on the asphalt.
-    // The camera FOLLOWS the car (the first capture used a fixed camera and
-    // the car drove out of frame, leaving rooftops). The car holds throttle
-    // so it keeps closing on the roadblock instead of coasting to a stop.
+    // Shot 3 "CHASE": day drift past a roadblock, 4 stars. The car holds
+    // throttle toward the roadblock, skid marks on the asphalt, one hydrant
+    // smashed open (geyser in frame). The camera is high-rear and TILTED
+    // UP: it looks at a point between the car and the heli, so the heli
+    // reads in the sky above the chase instead of being cropped out.
+    G.weather.setTimeOfDay(17.5);
     const car = G.vehicles.spawnCar('sport', 0, 0, 0, { driver: null, color: 0x4488c8 });
     G.vehicles.enterCar(car);
     car.vel.set(0, 0, 14);
-    G.police.setWanted(5);
+    G.police.setWanted(4);
     G.input.setOverride({ x: 0, y: 0.5 }, []);
     // Skid marks along the car's path (it travels ~15 m south in the settle).
     for (let i = 0; i < 10; i++) {
       G.effects.skid(-1 + i * 0.4, 2 + i * 1.2, 0.2);
     }
+    // One smashed hydrant by the road: geyser + wreckage in frame. The
+    // hydrant is the real nearest one to the chase line — the first draft
+    // knocked at a fixed (6, 12) where no hydrant stands, so nothing broke.
+    const hyd = G.city.hydrants.reduce((best, h) => {
+      const d = Math.hypot(h.x - 0, h.z - 10);
+      return !best || d < best.d ? { h, d } : best;
+    }, null);
+    if (hyd) {
+      const knocked = G.props.knockAt(hyd.h.x, hyd.h.z, 1);
+      for (const k of knocked) {
+        if (k.type === 'hydrant') G.effects.geyser(k.x, k.z);
+      }
+    }
     cameraFn = (camera) => {
       const c = state.car;
       if (!c) return;
-      // High rear view that follows the car, staying over the road centreline
-      // (a side offset risks parking the camera inside a tower downtown):
-      // car centre-frame, roadblock ahead in the upper frame, the tail
-      // behind at the bottom edge.
-      camera.position.set(c.pos.x - 4, 20, c.pos.z - 22);
-      camera.lookAt(c.pos.x, 0, c.pos.z + 28);
+      const h = heliPos();
+      // Pulled back and lowered (was 16 high, 22 behind): at 16/22 the car
+      // sat ~33 deg below the view axis, so aiming between car and heli
+      // pushed the heli out of the top of the frame. At 12/30 both fit
+      // inside the 70 deg FOV with room to spare.
+      camera.position.set(c.pos.x - 4, 12, c.pos.z - 30);
+      // Aim at the TRUE midpoint between car (y~0) and heli (y=h.alt) — the
+      // fixed y=9 aimed below the heli's track altitude and tilted the view
+      // down, cropping the heli out (probe: NDC y 6.85 at 3 s).
+      camera.lookAt((c.pos.x + h.x) / 2, h.alt / 2, (c.pos.z + h.z) / 2 + 10);
     };
-    settleLeft = 75;
+    // 6 s: the heli spends its first 3 s in high patrol (55 m) and needs
+    // ~3 s more in track to drop to 26 m and settle ahead of the car. At
+    // 3 s it was still at 49 m, nearly overhead — out of frame. The capture
+    // timer is disabled in shot mode, so the longer hold cannot bust the
+    // player, and the first flyby is 18+ s out — the heli stays in track.
+    settleLeft = 360;
   }
 
-  function stageMission() {
-    // Mission 7, the survive step: rifle out, enemies around the casino,
-    // wanted 3, countdown running, cyan marker on the minimap.
-    // The player stands at the intersection just east of the casino, facing
-    // NORTH down the street canyon — the first two stagings faced a building
-    // facade (v1) or the facades across the street (v2). Enemies stage on
-    // the road ahead, against the skyline.
-    G.player.setPos(54, 323, Math.PI);
-    state.weapon = 'rifle';
-    G.missions.startMission(7);
-    G.missions.jumpTo(2); // survive step: 3 stars, 30 s
-    for (let i = 0; i < 5; i++) {
-      const a = (i / 5) * Math.PI * 2;
-      G.combat.spawnEnemy(54 + Math.sin(a) * 6, 300 + Math.cos(a) * 6);
-    }
-    settleLeft = 120;
+  function stageScale() {
+    // Shot 4 "CITY SCALE": birdseye over the whole city at 10:00 — coast,
+    // tower, port cranes, the full grid. The player drives downtown with
+    // 3 stars; the heli is a small silhouette with its blob shadow and
+    // spotlight pool on the streets below. Fixed high camera, slow orbit.
+    G.weather.setTimeOfDay(10);
+    const car = G.vehicles.spawnCar('sport', 0, -54, 0, { driver: null, color: 0xc84444 });
+    G.vehicles.enterCar(car);
+    G.police.setWanted(3);
+    G.input.setOverride({ x: 0, y: 0.4 }, []);
+    let orbitA = 0.6;
+    cameraFn = (camera) => {
+      orbitA += 0.0004;
+      camera.position.set(Math.cos(orbitA) * 280, 260, Math.sin(orbitA) * 280 + 40);
+      camera.lookAt(0, 0, 0);
+    };
+    settleLeft = 300;
   }
 
   function stageSoak(seconds) {
@@ -135,7 +177,9 @@ export function createShots(G) {
   }
 
   function stageSystemsTest() {
-    // Twelve checks over the live systems. Runs synchronously at stage.
+    // Checks over the live systems. Runs synchronously at stage.
+    // Each ?shot= is a fresh page load, so the test car, test enemy and
+    // knocked hydrant left behind here never leak into a capture shot.
     const checks = {};
     const errorsBefore = G.errorCount;
     try {
@@ -152,13 +196,28 @@ export function createShots(G) {
       const enemy = G.combat.spawnEnemy(500, 500);
       checks.combat = enemy.hp === ENEMY_HEALTH;
       G.combat.removeEnemy(enemy);
-      checks.missions = G.missions.MISSIONS.length === 10;
+      checks.missions = G.missions.MISSIONS.length === 11;
       checks.crew = !!G.crew.cooldowns;
       checks.garage = !!G.city.landmarks.safehouse;
       writeSave(defaultSave());
       checks.save = loadSave() !== null;
       clearSave();
       checks.weather = !!G.weather && G.weather.gripFactor === 1;
+      // v2 systems.
+      G.police.setWanted(3);
+      checks.heli = !!G.police.heli && !!G.police.heliPos() && !!G.police.spotPool();
+      checks.capture = G.police.captureMax === 5;
+      checks.wantedState = G.police.wantedState() !== null;
+      G.police.setWanted(0);
+      checks.photo = !!G.photo && typeof G.photo.toggle === 'function';
+      checks.night = typeof G.buildings.setNight === 'function';
+      const hyd = G.city.hydrants[0];
+      checks.destructible = hyd ? G.props.knockAt(hyd.x, hyd.z, 1).length === 1 : false;
+      // The knock must also register in the props down-count (the QA
+      //-visible state), not just in the return value of knockAt.
+      checks.destructibleDown = hyd ? G.props.downCount() === 1 : false;
+      checks.trafficOvertake = G.traffic.list.every((c) => c._laneOff !== undefined);
+      checks.dayNight = typeof G.weather.setTimeOfDay === 'function' && G.weather.nightLevel !== undefined;
     } catch (err) {
       checks.exception = false;
       console.error('systems test failed', err);
@@ -172,10 +231,10 @@ export function createShots(G) {
     sceneName = name;
     resetState();
     state.screen = 'play';
-    if (name === 'cover') stageCover();
-    else if (name === 'city') stageCity();
+    if (name === 'strip') stageStrip();
+    else if (name === 'night') stageNight();
     else if (name === 'chase') stageChase();
-    else if (name === 'mission') stageMission();
+    else if (name === 'scale') stageScale();
     else if (name === 'soak') stageSoak(Number(urlParams.get('seconds')) || 20);
     else if (name === 'systemstest') stageSystemsTest();
     else settleLeft = 30; // unknown scene: just settle and signal ready
