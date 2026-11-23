@@ -1,10 +1,10 @@
-// Procedural Canvas 2D textures for Fortuna Bay — no image assets, 100%
+// Procedural Canvas 2D textures for Fortuna Bay v2 — no image assets, 100%
 // original. The ground is one big painted map (sand, roads, sidewalks, block
-// interiors, crosswalks, boardwalk); buildings get flat colours plus
-// instanced window quads instead of facade textures, so windows stay
-// proportional at any tower height. All noise is SEEDED (mulberry32) so the
-// same seed always paints the same ground — screenshots stay reproducible.
-import { BLOCK, GRID, HALF, ISLAND, PITCH, ROAD, WALK, districtAt } from './config.js';
+// interiors, crosswalks, boardwalk, helipads, plaza); buildings get flat
+// colours plus instanced window quads instead of facade textures, so windows
+// stay proportional at any tower height. All noise is SEEDED (mulberry32) so
+// the same seed always paints the same ground — screenshots stay reproducible.
+import { BLOCK, GRID, HALF, HELIPADS, ISLAND, PITCH, PLAZA, ROAD, WALK, districtAt } from './config.js';
 import { mulberry32 } from './random.js';
 
 const GROUND_PX = 2048;
@@ -119,6 +119,49 @@ export function makeGroundTexture(THREE) {
     }
   }
 
+  // Helipads (v2): dark circle, yellow ring, white H. Painted on the ground
+  // map so they read from the air and from the birdseye shot. The 3D pads
+  // in props.js sit on these exact spots (same centre + radius).
+  for (const pad of HELIPADS) {
+    const cx = px(pad.x);
+    const cz = px(pad.z);
+    const r = px(pad.radius) - px(0);
+    c.fillStyle = '#2e2e34';
+    c.beginPath();
+    c.arc(cx, cz, r, 0, Math.PI * 2);
+    c.fill();
+    c.strokeStyle = 'rgba(240,220,120,0.9)';
+    c.lineWidth = 3;
+    c.beginPath();
+    c.arc(cx, cz, r - 3, 0, Math.PI * 2);
+    c.stroke();
+    c.fillStyle = 'rgba(255,255,255,0.9)';
+    c.font = `bold ${Math.round(r * 1.1)}px Arial, sans-serif`;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText('H', cx, cz + 1);
+  }
+
+  // Plaza (v2): a round paved gathering space at the Beachfront corner.
+  {
+    const cx = px(PLAZA.x);
+    const cz = px(PLAZA.z);
+    const r = px(PLAZA.radius) - px(0);
+    c.fillStyle = '#b8a888';
+    c.beginPath();
+    c.arc(cx, cz, r, 0, Math.PI * 2);
+    c.fill();
+    c.strokeStyle = 'rgba(120,100,70,0.7)';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.arc(cx, cz, r * 0.55, 0, Math.PI * 2);
+    c.stroke();
+    c.fillStyle = 'rgba(90,140,180,0.8)';
+    c.beginPath();
+    c.arc(cx, cz, r * 0.18, 0, Math.PI * 2);
+    c.fill();
+  }
+
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
@@ -153,6 +196,28 @@ export function makeOceanTexture(THREE) {
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(8, 8);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// A soft radial disc (v2): white centre fading to transparent. One texture,
+// three uses — the rotor blur disc above the heli, the feathered edge of
+// the searchlight pool, and the heli's soft blob shadow (police.js). The
+// hard inner core keeps the rotor disc readable as a solid disc from far
+// away, instead of washing out into a faint halo.
+export function makeDiscTexture(THREE) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const c = canvas.getContext('2d');
+  const grad = c.createRadialGradient(64, 64, 4, 64, 64, 62);
+  grad.addColorStop(0, 'rgba(255,255,255,0.95)');
+  grad.addColorStop(0.35, 'rgba(255,255,255,0.75)');
+  grad.addColorStop(0.55, 'rgba(255,255,255,0.45)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = grad;
+  c.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
