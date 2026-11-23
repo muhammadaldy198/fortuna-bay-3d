@@ -1,9 +1,10 @@
-// Pedestrians for Fortuna Bay — walkers on the sidewalks who flee gunfire
-// and chases, call the police when they witness a crime, and go down when a
-// car hits them. Rendered as four InstancedMeshes (torso, head, two legs)
-// so 40+ peds cost four draw calls.
+// Pedestrians for Fortuna Bay v2 — walkers on the sidewalks who flee
+// gunfire and chases, call the police when they witness a crime, and go down
+// when a car hits them. v2: they cower under FALCON-1's rotor wash and run
+// out of its searchlight pool. Rendered as four InstancedMeshes (torso,
+// head, two legs) so 40+ peds cost four draw calls.
 import * as THREE from 'three';
-import { PED_COUNT, PED_FLEE_SPEED, PED_SPEED } from './config.js';
+import { HELI, PED_COUNT, PED_FLEE_SPEED, PED_SPEED } from './config.js';
 
 const SHIRT_COLORS = [0xc84444, 0x4488c8, 0x44a868, 0xd8a83c, 0x8855aa, 0xe8e8e8, 0xe88a4a, 0x4ad0d0];
 const SKIN_COLORS = [0xc89878, 0x8a5a3a, 0xe8b898, 0x6a4030];
@@ -107,6 +108,7 @@ export function createPeds(G) {
         p.wz = wz;
         p.state = 'walk';
         p.stateT = 0;
+        p.called = false; // a fresh face on the street can call again
         return;
       }
     }
@@ -115,10 +117,21 @@ export function createPeds(G) {
     p.x = x;
     p.z = z;
     p.state = 'walk';
+    p.called = false;
+  }
+
+  // True when a ped stands in the heli's rotor wash: low heli, close by.
+  function underWash(p, heli) {
+    return !!heli && heli.alt < 40
+      && Math.hypot(p.x - heli.x, p.z - heli.z) < HELI.WASH_RADIUS;
   }
 
   function update(dt) {
     const pp = playerPos();
+    // Heli context (v2): peds cower under the rotor wash and flee the
+    // searchlight pool. Both reads are guarded — police may not exist yet.
+    const heli = G.police && G.police.heliPos ? G.police.heliPos() : null;
+    const pool = G.police && G.police.spotPool ? G.police.spotPool() : null;
     for (const p of peds) {
       // A witness finishing the call reports the crime.
       if (p.callT > 0) {
@@ -144,6 +157,27 @@ export function createPeds(G) {
         }
         if (p.state === 'down') continue;
       }
+      // Rotor wash: a low heli overhead makes nearby peds cower in place.
+      // The state re-checks every frame — a ped that was cowering stands
+      // back up the moment the heli climbs or moves on.
+      if (underWash(p, heli) && p.state !== 'flee') {
+        p.state = 'cower';
+        p.stateT = 0.5;
+      } else if (p.state === 'cower') {
+        p.state = 'walk';
+      }
+      // Searchlight pool: standing in the beam makes a ped run for cover.
+      if (pool && p.state !== 'flee' && p.state !== 'cower') {
+        const dPool = Math.hypot(p.x - pool.x, p.z - pool.z);
+        if (dPool < pool.r) {
+          const away = Math.atan2(p.x - pool.x, p.z - pool.z);
+          p.dir = away;
+          p.fleeX = p.x + Math.sin(away) * 30;
+          p.fleeZ = p.z + Math.cos(away) * 30;
+          p.state = 'flee';
+          p.stateT = 3 + rng.next() * 2;
+        }
+      }
       let targetSpeed = p.speed;
       let tx = p.wx;
       let tz = p.wz;
@@ -158,6 +192,16 @@ export function createPeds(G) {
           p.wx = wx;
           p.wz = wz;
         }
+      } else if (p.state === 'cower') {
+        targetSpeed = 0;
+        tx = p.x;
+        tz = p.z;
+        p.stateT -= dt;
+        if (p.stateT <= 0 && !underWash(p, heli)) {
+          p.state = 'walk';
+        } else if (p.stateT <= 0) {
+          p.stateT = 0.5; // still under the wash: keep cowering
+        }
       }
       const dx = tx - p.x;
       const dz = tz - p.z;
@@ -167,11 +211,11 @@ export function createPeds(G) {
           const [wx, wz] = city.randomSidewalkPoint(rng);
           p.wx = wx;
           p.wz = wz;
-        } else {
+        } else if (p.state === 'flee') {
           p.fleeX = p.x + Math.sin(p.dir) * 30;
           p.fleeZ = p.z + Math.cos(p.dir) * 30;
         }
-      } else {
+      } else if (targetSpeed > 0) {
         const wantDir = Math.atan2(dx / d, dz / d);
         let diff = wantDir - p.dir;
         while (diff > Math.PI) diff -= Math.PI * 2;
@@ -189,27 +233,28 @@ export function createPeds(G) {
     // Write the four instanced meshes.
     peds.forEach((p, i) => {
       const down = p.state === 'down';
-      const swing = down ? 0 : Math.sin(p.phase) * 0.5;
-      const bob = down ? 0 : Math.abs(Math.sin(p.phase)) * 0.05;
-      // Torso.
-      dummy.position.set(p.x, down ? 0.35 : 1.05 + bob, p.z);
-      dummy.rotation.set(down ? Math.PI / 2 : 0, p.dir, 0);
+      const cower = p.state === 'cower';
+      const swing = (down || cower) ? 0 : Math.sin(p.phase) * 0.5;
+      const bob = (down || cower) ? 0 : Math.abs(Math.sin(p.phase)) * 0.05;
+      // Torso: standing 1.05, cowering 0.7 (crouched), down 0.35 (flat).
+      dummy.position.set(p.x, down ? 0.35 : cower ? 0.7 : 1.05 + bob, p.z);
+      dummy.rotation.set(down ? Math.PI / 2 : cower ? 0.5 : 0, p.dir, 0);
       dummy.scale.set(1, 1, 1);
       dummy.updateMatrix();
       torsos.setMatrixAt(i, dummy.matrix);
       // Head.
-      dummy.position.set(p.x + (down ? Math.sin(p.dir) * 0.5 : 0), down ? 0.3 : 1.62 + bob, p.z + (down ? Math.cos(p.dir) * 0.5 : 0));
-      dummy.rotation.set(down ? Math.PI / 2 : 0, p.dir, 0);
+      dummy.position.set(p.x + (down ? Math.sin(p.dir) * 0.5 : 0), down ? 0.3 : cower ? 1.05 : 1.62 + bob, p.z + (down ? Math.cos(p.dir) * 0.5 : 0));
+      dummy.rotation.set(down ? Math.PI / 2 : cower ? 0.5 : 0, p.dir, 0);
       dummy.updateMatrix();
       heads.setMatrixAt(i, dummy.matrix);
-      // Legs swing against each other.
+      // Legs swing against each other; cowering bends them.
       for (const [mesh, side, phase] of [[legL, -0.14, swing], [legR, 0.14, -swing]]) {
         dummy.position.set(
           p.x + Math.cos(p.dir) * side,
-          down ? 0.25 : 0.45 + bob,
+          down ? 0.25 : cower ? 0.35 : 0.45 + bob,
           p.z - Math.sin(p.dir) * side,
         );
-        dummy.rotation.set(down ? Math.PI / 2 : phase, p.dir, 0);
+        dummy.rotation.set(down ? Math.PI / 2 : cower ? 1.1 : phase, p.dir, 0);
         dummy.updateMatrix();
         mesh.setMatrixAt(i, dummy.matrix);
       }
