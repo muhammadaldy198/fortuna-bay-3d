@@ -1,14 +1,22 @@
-// Police for Fortuna Bay — the FBPD wanted system. Stars rise on crimes
+// Police for Fortuna Bay v2 — the FBPD wanted system. Stars rise on crimes
 // (carjack, hitting peds, shooting, killing cops), cops chase with ramming
 // pursuit, roadblocks at 4 stars, helicopter FALCON-1 with a searchlight
-// at 5. Break line of sight and the heat decays.
+// at 3 stars. Break line of sight and the heat decays.
+// v2: the heli is a first-class system, not a dot overhead — it patrols high,
+// drops to a low TRACK offset AHEAD of the player (inside the chase camera's
+// view), crosses the frame in periodic FLYBYs, and HOVERs in front of the
+// player sweeping its spotlight. The spotlight is a threat: 5 s continuous
+// in the pool and the player is BUSTED. The heli can be shot down.
 import * as THREE from 'three';
 import {
-  COPS_PER_STAR, COP_SPEED, EVADE_SECONDS, HELI_STAR, ROADBLOCK_STAR,
-  SIREN_RANGE, WANTED_MAX, nearestRoad,
+  COPS_PER_STAR, COP_SPEED, EVADE_SECONDS, HELI, HELI_STAR, ROADBLOCK_STAR,
+  WANTED_MAX, nearestRoad,
 } from './config.js';
+import { makeDiscTexture } from './textures.js';
 
 const COP_RESPAWN_DELAY = 8; // seconds before a wrecked cop is replaced
+const HELI_DOWN_DELAY = 30; // seconds before a shot-down heli is replaced
+const HELI_HP = 100;
 
 export function createPolice(G) {
   const { scene, city, vehicles, rng, state, emit, on } = G;
@@ -19,6 +27,7 @@ export function createPolice(G) {
   let evadeT = 0;
   let bustT = 0;
   let lastGunshotHeat = -10;
+  let heliDownT = 0;
   const pendingSpawns = []; // timestamps at which a wrecked cop is replaced
 
   function playerPos() {
@@ -131,49 +140,147 @@ export function createPolice(G) {
   }
 
   function buildHeli() {
-    if (heli) return;
+    if (heli || heliDownT > 0) return;
     const group = new THREE.Group();
     const bodyMat = new THREE.MeshLambertMaterial({ color: 0x1a2a44 });
     const body = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.6, 5), bodyMat);
     group.add(body);
+    const nose = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.2, 1.2),
+      new THREE.MeshLambertMaterial({ color: 0x2a4a6a }));
+    nose.position.set(0, 0.1, 2.8);
+    group.add(nose);
     const tail = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 4), bodyMat);
     tail.position.set(0, 0.2, -4);
     group.add(tail);
+    const tailFin = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1.4, 0.9), bodyMat);
+    tailFin.position.set(0, 0.9, -5.6);
+    group.add(tailFin);
+    const skidMat = new THREE.MeshLambertMaterial({ color: 0x333333 });
+    for (const sx of [-0.9, 0.9]) {
+      const skid = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 4.2), skidMat);
+      skid.position.set(sx, -1.0, 0);
+      group.add(skid);
+    }
+    // Main rotor: two crossed blades + a translucent blur disc.
     const rotorMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
-    const rotor = new THREE.Mesh(new THREE.BoxGeometry(11, 0.08, 0.4), rotorMat);
+    const rotor = new THREE.Group();
+    const blade1 = new THREE.Mesh(new THREE.BoxGeometry(11, 0.08, 0.4), rotorMat);
+    const blade2 = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.08, 11), rotorMat);
+    rotor.add(blade1);
+    rotor.add(blade2);
     rotor.position.y = 1.1;
     group.add(rotor);
-    // Searchlight: a cone from the heli to the ground + a bright pool.
-    const coneMat = new THREE.MeshBasicMaterial({
-      color: 0xfff2b0, transparent: true, opacity: 0.14,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-    });
-    const cone = new THREE.Mesh(new THREE.ConeGeometry(7, 42, 12, 1, true), coneMat);
-    cone.position.y = -21;
-    cone.rotation.x = Math.PI;
-    group.add(cone);
-    const pool = new THREE.Mesh(
-      new THREE.CircleGeometry(7, 20),
+    const disc = new THREE.Mesh(
+      new THREE.CircleGeometry(5.6, 24),
       new THREE.MeshBasicMaterial({
-        color: 0xfff2b0, transparent: true, opacity: 0.25,
-        blending: THREE.AdditiveBlending, depthWrite: false,
+        map: makeDiscTexture(THREE),
+        color: 0xbbbbbb, transparent: true, opacity: 0.35,
+        depthWrite: false, side: THREE.DoubleSide,
       }),
     );
+    disc.rotation.x = -Math.PI / 2;
+    disc.position.y = 1.15;
+    group.add(disc);
+    // Tail rotor.
+    const tailRotor = new THREE.Mesh(new THREE.BoxGeometry(0.08, 2.2, 0.3), rotorMat);
+    tailRotor.position.set(0.4, 0.4, -5.6);
+    group.add(tailRotor);
+    // Nav lights: red left, green right, white strobe on the tail.
+    const navL = new THREE.Mesh(new THREE.SphereGeometry(0.18, 6, 6),
+      new THREE.MeshBasicMaterial({ color: 0xff2222 }));
+    navL.position.set(-1.15, 0, 0.5);
+    group.add(navL);
+    const navR = new THREE.Mesh(new THREE.SphereGeometry(0.18, 6, 6),
+      new THREE.MeshBasicMaterial({ color: 0x22ff44 }));
+    navR.position.set(1.15, 0, 0.5);
+    group.add(navR);
+    const strobe = new THREE.Mesh(new THREE.SphereGeometry(0.22, 6, 6),
+      new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    strobe.position.set(0, 1.0, -5.6);
+    group.add(strobe);
+    // Searchlight cone: a unit cone inside an aiming group. The group sits
+    // at the midpoint between heli and pool and lookAts the pool; the cone
+    // child is rotated so its apex is at the heli and its base at the pool.
+    // Its Y scale is the heli-to-pool distance, its XZ scale the pool radius.
+    const coneGroup = new THREE.Group();
+    const coneMat = new THREE.MeshBasicMaterial({
+      color: 0xfff2b0, transparent: true, opacity: HELI.CONE_OPACITY,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    });
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(1, 1, 16, 1, true), coneMat);
+    cone.rotation.x = -Math.PI / 2;
+    coneGroup.add(cone);
+    scene.add(coneGroup);
+    // Ground pool: a bright disc where the beam lands. The soft radial
+    // texture gives it a feathered edge instead of a hard circle.
+    const poolMat = new THREE.MeshBasicMaterial({
+      map: makeDiscTexture(THREE),
+      color: 0xfff2b0, transparent: true, opacity: 0.55,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const pool = new THREE.Mesh(new THREE.CircleGeometry(HELI.SPOT_RADIUS, 24), poolMat);
     pool.rotation.x = -Math.PI / 2;
     pool.position.y = 0.1;
     scene.add(pool);
+    // Blob shadow: a soft dark disc under the heli on the ground. Its
+    // radius is HELI.SHADOW_SIZE (diameter) / 2, and it fades as the heli
+    // climbs — a high heli casts a faint, wide shadow.
+    const shadow = new THREE.Mesh(
+      new THREE.CircleGeometry(HELI.SHADOW_SIZE / 2, 20),
+      new THREE.MeshBasicMaterial({
+        map: makeDiscTexture(THREE),
+        color: 0x000000, transparent: true, opacity: 0.5, depthWrite: false,
+      }),
+    );
+    shadow.rotation.x = -Math.PI / 2;
+    shadow.position.y = 0.05;
+    scene.add(shadow);
     const pp = playerPos();
-    group.position.set(pp.x, 42, pp.z);
+    group.position.set(pp.x + 40, HELI.PATROL_ALT, pp.z - 40);
     scene.add(group);
-    heli = { group, rotor, pool };
+    heli = {
+      group, rotor, tailRotor, disc, strobe, coneGroup, cone, coneMat,
+      pool, poolMat, shadow,
+      mode: 'patrol', modeT: 0, orbitA: Math.atan2(-40, 40),
+      flybyT: HELI.FLYBY_MIN + rng.next() * (HELI.FLYBY_MAX - HELI.FLYBY_MIN),
+      flyFrom: null, flyTo: null, flyDur: 1,
+      hoverT: 0, sweepA: 0,
+      poolX: pp.x, poolZ: pp.z,
+      // A fresh heli starts with a clean capture timer: the player is never
+      // busted by the previous heli's half-filled beam.
+      captureT: 0, hp: HELI_HP,
+      velX: 0, velZ: 0, prevX: pp.x + 40, prevZ: pp.z - 40,
+    };
     emit('heli', {});
   }
 
   function clearHeli() {
     if (!heli) return;
     scene.remove(heli.group);
+    scene.remove(heli.coneGroup);
     scene.remove(heli.pool);
+    scene.remove(heli.shadow);
     heli = null;
+    if (G.audio) {
+      G.audio.setRotor(false);
+      G.audio.setCaptureAlarm(false);
+    }
+  }
+
+  // Shooting the heli: it goes down in flames, the heat jumps 2 stars, and
+  // the FBPD needs 30 s to send a replacement.
+  function damageHeli(amount) {
+    if (!heli) return;
+    heli.hp -= amount;
+    if (heli.hp <= 0) {
+      const hp = heli.group.position;
+      if (G.effects) G.effects.explosion({ x: hp.x, y: hp.y, z: hp.z });
+      if (G.audio) G.audio.explosion();
+      clearHeli();
+      heliDownT = HELI_DOWN_DELAY;
+      emit('heliDown', { x: hp.x, z: hp.z });
+      addWanted(2);
+    }
   }
 
   // Bring the force in line with the wanted level. `immediate` fills a
@@ -206,10 +313,196 @@ export function createPolice(G) {
     // the nearest cop's distance is known.
   }
 
+  // Readable wanted state for the HUD: what the FBPD is doing right now.
+  function wantedState() {
+    if (state.wanted === 0) return null;
+    if (evadeT > 0.5) return 'SEARCHING';
+    const pp = playerPos();
+    const copNear = cops.some((c) => Math.hypot(c.pos.x - pp.x, c.pos.z - pp.z) < 40);
+    if (copNear) return 'ACTIVE';
+    return 'ESCAPING';
+  }
+
+  // Heli position for peds (cower), the player camera (shake) and the HUD.
+  function heliPos() {
+    if (!heli) return null;
+    const p = heli.group.position;
+    return { x: p.x, z: p.z, alt: p.y, mode: heli.mode };
+  }
+
+  // Searchlight pool on the ground, for peds and the minimap.
+  function spotPool() {
+    if (!heli) return null;
+    return { x: heli.poolX, z: heli.poolZ, r: HELI.SPOT_RADIUS };
+  }
+
+  // Steer the heli toward (tx, tz, alt) at up to HELI.SPEED, banking into
+  // the turn. Returns the distance left to the target.
+  function steerHeli(tx, tz, alt, dt) {
+    const hp = heli.group.position;
+    const dx = tx - hp.x;
+    const dz = tz - hp.z;
+    const dist = Math.hypot(dx, dz);
+    const speed = Math.min(HELI.SPEED, 6 + dist * 0.5);
+    if (dist > 0.5) {
+      hp.x += (dx / dist) * speed * dt;
+      hp.z += (dz / dist) * speed * dt;
+    }
+    hp.y += (alt - hp.y) * Math.min(1, dt * 1.2);
+    // Yaw toward the velocity, bank into the turn.
+    const vx = (hp.x - heli.prevX) / Math.max(dt, 0.001);
+    const vz = (hp.z - heli.prevZ) / Math.max(dt, 0.001);
+    const v = Math.hypot(vx, vz);
+    if (v > 1) {
+      const wantYaw = Math.atan2(vx, vz);
+      let diff = wantYaw - heli.group.rotation.y;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      heli.group.rotation.y += diff * Math.min(1, dt * 2);
+      heli.group.rotation.z = Math.max(-0.3, Math.min(0.3, -diff * 0.6));
+      heli.group.rotation.x = Math.max(-0.15, Math.min(0.15, v * 0.004));
+    }
+    heli.prevX = hp.x;
+    heli.prevZ = hp.z;
+    return dist;
+  }
+
+  function updateHeli(dt) {
+    if (!heli) return;
+    const pp = playerPos();
+    // The heli chases the decoy ghost while Lola's decoy lasts — the pool
+    // follows the ghost, so the real player can slip out of the light.
+    const tp = chaseTarget();
+    const heading = playerHeading();
+    const fx = Math.sin(heading);
+    const fz = Math.cos(heading);
+    const rx = -fz; // right vector of the player's heading
+    const rz = fx;
+    heli.modeT += dt;
+    heli.flybyT -= dt;
+
+    if (heli.mode === 'patrol') {
+      // High orbit around the target while the heli gets into position.
+      heli.orbitA += (HELI.SPEED / HELI.ORBIT_RADIUS) * dt;
+      const tx = tp.x + Math.sin(heli.orbitA) * HELI.ORBIT_RADIUS;
+      const tz = tp.z + Math.cos(heli.orbitA) * HELI.ORBIT_RADIUS;
+      steerHeli(tx, tz, HELI.PATROL_ALT, dt);
+      if (heli.modeT > 3) {
+        heli.mode = 'track';
+        heli.modeT = 0;
+      }
+    } else if (heli.mode === 'track') {
+      // Low, AHEAD of the target — inside the chase camera's view.
+      const tx = tp.x + fx * HELI.TRACK_AHEAD + rx * HELI.TRACK_SIDE;
+      const tz = tp.z + fz * HELI.TRACK_AHEAD + rz * HELI.TRACK_SIDE;
+      steerHeli(tx, tz, HELI.TRACK_ALT, dt);
+      if (heli.flybyT <= 0) {
+        // Flyby: cross in front of the camera, left to right.
+        const leadX = tp.x + fx * HELI.FLYBY_LEAD;
+        const leadZ = tp.z + fz * HELI.FLYBY_LEAD;
+        heli.flyFrom = { x: leadX - rx * 50, z: leadZ - rz * 50 };
+        heli.flyTo = { x: leadX + rx * 50, z: leadZ + rz * 50 };
+        heli.flyDur = 100 / HELI.SPEED;
+        heli.mode = 'flyby';
+        heli.modeT = 0;
+      }
+    } else if (heli.mode === 'flyby') {
+      const t = Math.min(1, heli.modeT / heli.flyDur);
+      const tx = heli.flyFrom.x + (heli.flyTo.x - heli.flyFrom.x) * t;
+      const tz = heli.flyFrom.z + (heli.flyTo.z - heli.flyFrom.z) * t;
+      steerHeli(tx, tz, HELI.FLYBY_ALT, dt);
+      if (t >= 1) {
+        heli.mode = 'hover';
+        heli.modeT = 0;
+        heli.hoverT = HELI.HOVER_MIN + rng.next() * (HELI.HOVER_MAX - HELI.HOVER_MIN);
+        heli.sweepA = rng.next() * Math.PI * 2;
+      }
+    } else if (heli.mode === 'hover') {
+      // Hang in front of the target, sweeping the spotlight around them.
+      const tx = tp.x + fx * HELI.HOVER_DIST;
+      const tz = tp.z + fz * HELI.HOVER_DIST;
+      steerHeli(tx, tz, HELI.TRACK_ALT, dt);
+      heli.sweepA += dt * 0.9;
+      if (heli.modeT > heli.hoverT) {
+        heli.mode = 'track';
+        heli.modeT = 0;
+        heli.flybyT = HELI.FLYBY_MIN + rng.next() * (HELI.FLYBY_MAX - HELI.FLYBY_MIN);
+      }
+    }
+
+    // Rotor + strobe. (The blur disc is radially symmetric, so spinning
+    // it would be invisible — the rotor group carries the motion.)
+    const rpm = (HELI.ROTOR_RPM * Math.PI * 2) / 60;
+    heli.rotor.rotation.y += rpm * dt;
+    heli.tailRotor.rotation.x += rpm * 2.4 * dt;
+    // The strobe blinks on HELI.STROBE_INTERVAL (0.9 s): half the interval
+    // on, half off — a slow double-flash reads as an aircraft, not a lamp.
+    heli.strobe.visible = Math.floor(clock / HELI.STROBE_INTERVAL) % 2 === 0;
+
+    // Spotlight pool: follows the target with lag; during a hover it sweeps
+    // in a circle around them. The cone + pool never detach: the cone is
+    // re-aimed at the pool every frame.
+    const sweepR = heli.mode === 'hover' ? 9 : 0;
+    const targetPoolX = tp.x + Math.sin(heli.sweepA) * sweepR;
+    const targetPoolZ = tp.z + Math.cos(heli.sweepA) * sweepR;
+    heli.poolX += (targetPoolX - heli.poolX) * Math.min(1, dt * 2.5);
+    heli.poolZ += (targetPoolZ - heli.poolZ) * Math.min(1, dt * 2.5);
+    heli.pool.position.x = heli.poolX;
+    heli.pool.position.z = heli.poolZ;
+    const hp = heli.group.position;
+    const night = G.weather && G.weather.nightLevel !== undefined ? G.weather.nightLevel : 0;
+    // The cone's base opacity is HELI.CONE_OPACITY from config; night makes
+    // the beam read stronger against the dark (0.16 day → 0.24 night).
+    heli.coneMat.opacity = HELI.CONE_OPACITY + night * 0.08;
+    heli.poolMat.opacity = 0.22 + night * 0.16;
+    const midX = (hp.x + heli.poolX) / 2;
+    const midZ = (hp.z + heli.poolZ) / 2;
+    const dist = Math.hypot(hp.x - heli.poolX, hp.y - 0.1, hp.z - heli.poolZ);
+    heli.coneGroup.position.set(midX, hp.y / 2, midZ);
+    heli.coneGroup.lookAt(heli.poolX, 0.1, heli.poolZ);
+    heli.cone.scale.set(HELI.SPOT_RADIUS, dist, HELI.SPOT_RADIUS);
+    // Blob shadow under the heli.
+    heli.shadow.position.x = hp.x;
+    heli.shadow.position.z = hp.z;
+    heli.shadow.material.opacity = Math.max(0.12, 0.4 - hp.y * 0.004);
+
+    // Rotor wash: dust + leaves blown outward while the heli is low.
+    if (hp.y < 40 && G.effects) {
+      const strength = 1 - Math.max(0, hp.y - 15) / 25;
+      G.effects.wash(hp.x, hp.z, HELI.WASH_RADIUS, Math.max(0.2, strength));
+    }
+    // Rotor audio: louder when the heli is close to the player.
+    if (G.audio) {
+      const dHeli = Math.hypot(hp.x - pp.x, hp.z - pp.z);
+      const level = Math.max(0.1, 1 - dHeli / 150);
+      G.audio.setRotor(true, level);
+    }
+
+    // Capture timer: standing in the pool fills it; leaving drains it fast.
+    // 5 s continuous in the light and the player is BUSTED. Disabled while
+    // staging screenshots — the staged scenes hold the player in the light
+    // on purpose, and a respawn mid-staging would ruin the shot.
+    const dPool = Math.hypot(pp.x - heli.poolX, pp.z - heli.poolZ);
+    if (dPool < HELI.SPOT_RADIUS) {
+      heli.captureT += dt;
+    } else {
+      heli.captureT = Math.max(0, heli.captureT - dt * 3);
+    }
+    if (G.audio) G.audio.setCaptureAlarm(heli.captureT > 3);
+    if (heli.captureT >= HELI.CAPTURE_SECONDS && !G.shotMode) {
+      heli.captureT = 0;
+      emit('busted', { by: 'spotlight' });
+    }
+  }
+
   function update(dt) {
     clock += dt;
     const pp = playerPos();
     const target = chaseTarget();
+    if (heliDownT > 0) {
+      heliDownT -= dt;
+      if (heliDownT <= 0 && state.wanted >= HELI_STAR) buildHeli();
+    }
 
     // Siren volume follows the nearest cop: loud up close, a whisper far away.
     // (G.audio at runtime — the destructured copy would be undefined, because
@@ -290,24 +583,11 @@ export function createPolice(G) {
       }
     }
 
-    // Helicopter: follows the player at 42 m, searchlight on the ground.
-    if (heli) {
-      const hp = heli.group.position;
-      hp.x += (pp.x - hp.x) * Math.min(1, dt * 0.7);
-      hp.z += (pp.z - hp.z) * Math.min(1, dt * 0.7);
-      hp.y = 42;
-      heli.rotor.rotation.y += dt * 30;
-      heli.pool.position.x = pp.x;
-      heli.pool.position.z = pp.z;
-      // The cone leans from the heli toward the player.
-      const dx = pp.x - hp.x;
-      const dz = pp.z - hp.z;
-      heli.group.rotation.x = Math.atan2(dz, 42) * 0.5;
-      heli.group.rotation.z = -Math.atan2(dx, 42) * 0.5;
-    }
+    updateHeli(dt);
 
-    // Busted: on foot, a cop close by, standing still.
-    if (!state.inCar && state.wanted > 0) {
+    // Busted: on foot, a cop close by, standing still. Disabled while
+    // staging screenshots (the night shot stands still on purpose).
+    if (!state.inCar && state.wanted > 0 && !G.shotMode) {
       const close = cops.some((c) => Math.hypot(c.pos.x - pp.x, c.pos.z - pp.z) < 4.5);
       if (close && G.player.speed < 1) {
         bustT += dt;
@@ -331,6 +611,8 @@ export function createPolice(G) {
         evadeT += dt;
         if (evadeT >= EVADE_SECONDS) {
           evadeT = 0;
+          // Dropping from 3 stars to 2 escapes FALCON-1: it counts.
+          if (state.wanted === 3 && heli) state.heliEscapes = (state.heliEscapes || 0) + 1;
           setWanted(state.wanted - 1);
         }
       } else {
@@ -339,5 +621,13 @@ export function createPolice(G) {
     }
   }
 
-  return { cops, get heli() { return heli; }, get roadblock() { return roadblock; }, addWanted, setWanted, syncForce, update };
+  return {
+    cops,
+    get heli() { return heli; },
+    get roadblock() { return roadblock; },
+    get captureT() { return heli ? heli.captureT : 0; },
+    get captureMax() { return HELI.CAPTURE_SECONDS; },
+    addWanted, setWanted, syncForce, update,
+    damageHeli, wantedState, heliPos, spotPool,
+  };
 }
