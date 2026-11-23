@@ -1,8 +1,11 @@
-// City data for Fortuna Bay — generated from one seed, deterministic.
+// City data for Fortuna Bay v2 — generated from one seed, deterministic.
 // Blocks, buildings, colliders, landmarks, spawn points, packages, race
 // route. Rendering lives in buildings.js / props.js; this file is pure data.
 // Collision is AABB for buildings and circles for trees, lamps and cranes.
-import { BLOCK, GRID, HALF, PITCH, ROAD, blockCenter, districtAt, roadLine } from './config.js';
+// v2 adds: two helipads + the Ocean Plaza (from config), destructible
+// hydrants, and a collider lookup so props can disable a collider when its
+// furniture gets knocked down.
+import { BLOCK, GRID, HALF, HELIPADS, PLAZA, ROAD, blockCenter, districtAt, nearestRoad, roadLine } from './config.js';
 import { createRandom, hash2 } from './random.js';
 
 // Nothing may leave this radius from the island centre (the ground plane is
@@ -46,6 +49,7 @@ export function createCity(seed) {
   const colliders = []; // { x, z, hw, hd } boxes or { x, z, r } circles
   const trees = [];
   const lamps = [];
+  const hydrants = [];
 
   const landmarkAt = new Map();
   for (const [i, j, key] of LANDMARK_BLOCKS) landmarkAt.set(`${i},${j}`, key);
@@ -64,6 +68,11 @@ export function createCity(seed) {
       const district = districtAt(i, j);
       const [cx, cz] = blockCenter(i, j);
       blocks.push({ i, j, x: cx, z: cz, district: district.name, style: district.style });
+      // Cleared blocks: the plaza and the helipads sit on open ground —
+      // no buildings and no trees, or the fountain would grow a tower.
+      const cleared = Math.hypot(cx - PLAZA.x, cz - PLAZA.z) < 30
+        || HELIPADS.some((pad) => Math.hypot(cx - pad.x, cz - pad.z) < 30);
+      if (cleared) continue;
       const landmarkKey = landmarkAt.get(`${i},${j}`);
       if (landmarkKey) {
         const [, , , , w, d, h, floors, color, style] = LANDMARK_BLOCKS.find((l) => l[2] === landmarkKey);
@@ -111,6 +120,19 @@ export function createCity(seed) {
     }
   }
 
+  // Hydrants (v2, destructible): on the opposite corner of every third
+  // intersection, so a chase can smash one and open a geyser.
+  for (let i = 0; i <= GRID; i++) {
+    for (let j = 0; j <= GRID; j++) {
+      if ((i + j) % 3 !== 0) continue;
+      const x = roadLine(i) - ROAD / 2 - 1.5;
+      const z = roadLine(j) - ROAD / 2 - 1.5;
+      const collider = { x, z, r: 0.35 };
+      hydrants.push({ x, z, collider });
+      colliders.push(collider);
+    }
+  }
+
   // Boardwalk palms: a row of tall palms along the beachfront promenade
   // (visible from the malecón in the city screenshot).
   for (let x = -HALF + 20; x <= HALF - 20; x += 18) {
@@ -128,11 +150,14 @@ export function createCity(seed) {
   }
   landmarks.lighthouse = { x: -HALF - 60, z: HALF + 40, name: 'Isla Light' };
   landmarks.beach = { x: 0, z: HALF + 30, name: 'Fortuna Beach' };
+  landmarks.plaza = { x: PLAZA.x, z: PLAZA.z, name: 'Ocean Plaza' };
   colliders.push({ x: landmarks.lighthouse.x, z: landmarks.lighthouse.z, r: 4 });
   // Port cranes (props.js builds them at the same spots).
   for (let k = 0; k < 3; k++) {
     colliders.push({ x: 300 + k * 40, z: -140, r: 3 });
   }
+  // Plaza fountain (props.js builds it at the same spot).
+  colliders.push({ x: PLAZA.x, z: PLAZA.z, r: 4 });
 
   // 10 hidden packages: near landmarks and at the city corners.
   const packageSpots = [
@@ -165,9 +190,11 @@ export function createCity(seed) {
   ];
 
   // Push a circle (x, z, radius r) out of every collider it overlaps, then
-  // clamp it to the island. Returns the corrected [x, z].
+  // clamp it to the island. Returns the corrected [x, z]. Colliders flagged
+  // disabled (knocked-down furniture) are skipped.
   function collideCircle(x, z, r) {
     for (const c of colliders) {
+      if (c.disabled) continue;
       if (c.r !== undefined) {
         const dx = x - c.x;
         const dz = z - c.z;
@@ -205,16 +232,19 @@ export function createCity(seed) {
     return [x, z];
   }
 
-  // True when (x, z) is on a road: within half a road width of a road line
-  // in either axis.
-  function isOnRoad(x, z) {
-    const rx = Math.abs(x - nearestRoadLine(x));
-    const rz = Math.abs(z - nearestRoadLine(z));
-    return rx < ROAD / 2 || rz < ROAD / 2;
+  // The circle collider at exactly (x, z), or undefined. Props uses it to
+  // disable the collider of a lamp or tree it knocks down.
+  function colliderAt(x, z) {
+    return colliders.find((c) => c.r !== undefined && c.x === x && c.z === z);
   }
 
-  function nearestRoadLine(v) {
-    return Math.round(v / PITCH + GRID / 2) * PITCH - HALF;
+  // True when (x, z) is on a road: within half a road width of a road line
+  // in either axis. Uses the shared nearestRoad from config — the local
+  // copy that used to live here drifted once already; one source of truth.
+  function isOnRoad(x, z) {
+    const rx = Math.abs(x - nearestRoad(x));
+    const rz = Math.abs(z - nearestRoad(z));
+    return rx < ROAD / 2 || rz < ROAD / 2;
   }
 
   function randomRoadPoint(rngStream) {
@@ -238,7 +268,9 @@ export function createCity(seed) {
 
   // Line of sight: true when the segment between two points crosses no
   // building footprint. Sampled every 2 m against the building AABBs, so
-  // enemies (and cops) can't shoot the player through a tower.
+  // enemies (and cops) can't shoot the player through a tower. A rotated
+  // building (ry = 90°) swaps its footprint — the same swap addBuilding
+  // applies to its collider — so the check uses the rotated half-extents.
   function hasLineOfSight(x0, z0, x1, z1) {
     const dist = Math.hypot(x1 - x0, z1 - z0);
     const steps = Math.max(1, Math.ceil(dist / 2));
@@ -247,15 +279,18 @@ export function createCity(seed) {
       const x = x0 + (x1 - x0) * t;
       const z = z0 + (z1 - z0) * t;
       for (const b of buildings) {
-        if (Math.abs(x - b.x) < b.w / 2 && Math.abs(z - b.z) < b.d / 2) return false;
+        const hw = (b.ry !== 0 ? b.d : b.w) / 2;
+        const hd = (b.ry !== 0 ? b.w : b.d) / 2;
+        if (Math.abs(x - b.x) < hw && Math.abs(z - b.z) < hd) return false;
       }
     }
     return true;
   }
 
   return {
-    seed, blocks, buildings, colliders, trees, lamps, landmarks, packages, race, ramps,
-    collideCircle, isOnRoad, randomRoadPoint, randomSidewalkPoint, hasLineOfSight,
+    seed, blocks, buildings, colliders, trees, lamps, hydrants, landmarks, packages, race, ramps,
+    helipads: HELIPADS, plaza: PLAZA,
+    collideCircle, colliderAt, isOnRoad, randomRoadPoint, randomSidewalkPoint, hasLineOfSight,
   };
 }
 
