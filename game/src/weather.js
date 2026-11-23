@@ -1,152 +1,130 @@
-// Weather for Fortuna Bay v2 — a full day/night cycle plus passing rain
-// showers. The sun, sky, fog and window glow all follow the clock: golden
-// hour at 17:30–19:00, deep night at 21:00–05:00 (the searchlight shot
-// lives there), bright morning at 10:00. Rain is not decoration: it cuts
-// grip (RAIN_GRIP_FACTOR), pulls the fog in, dims the sun, and plays rain
-// noise. The first stretch is always clear for at least 150 s, so
-// screenshots always see the staged light.
+// Weather: a day/night cycle that moves the sun, recolours the sky and the
+// fog, and rain that soaks the city — worse grip, closer fog, streaks in the
+// air. The sun, the hemisphere light and the ambient light all live here;
+// main.js only owns the scene they shine on.
+
 import * as THREE from 'three';
-import {
-  FOG_COLOR, FOG_FAR, FOG_NEAR, RAIN_FOG_FAR, RAIN_FOG_NEAR, RAIN_GRIP_FACTOR,
-  SKY_HORIZON, WEATHER_CLEAR_MAX, WEATHER_CLEAR_MIN,
-  WEATHER_RAIN_MAX, WEATHER_RAIN_MIN,
-} from './config.js';
+import { WEATHER, PALETTE } from './config.js';
 
-const RAIN_DROPS = 800;
-const RAIN_AREA = 70; // the rain box follows the player
+const DAY_COLOR = new THREE.Color(PALETTE.skyDay);
+const NIGHT_COLOR = new THREE.Color(PALETTE.skyNight);
+const DAY_SUN = new THREE.Color(PALETTE.sunDay);
+const NIGHT_SUN = new THREE.Color(PALETTE.sunNight);
 
-// Night sky: near-black blue zenith, dark slate horizon, dim moonlight.
-const NIGHT_TOP = 0x050914;
-const NIGHT_HORIZON = 0x1a2438;
-const NIGHT_FOG = 0x0d1526;
-const DAY_TOP = 0x3a6ab0;
-const DAY_HORIZON = 0xa8d0f0;
-
+/**
+ * Create the weather for world G. Returns:
+ * - timeOfDay — hours 0–24 (also mirrored on G.timeOfDay)
+ * - raining — is it raining
+ * - grip — 1 dry, WEATHER.rainGrip wet
+ * - setTimeOfDay(h) / setRain(on)
+ * - update(dt)
+ */
 export function createWeather(G) {
-  const { scene, rng, emit } = G;
-  let mode = 'clear';
-  let timer = rng.range(WEATHER_CLEAR_MIN, WEATHER_CLEAR_MAX);
-  let nightLevel = 0; // 0 = full day, 1 = full night
-  let forcedHour = null; // ?time= / a shot stage pins the clock
+  let timeOfDay = 10.5;
+  let raining = false;
+  let rainTimer = 90;
+  let grip = 1;
 
-  // Rain streaks: one Points cloud, recycled inside a box around the player.
-  // Positions come from the SEEDED stream (rng), never Math.random — the
-  // rain must look identical on a deterministic re-run of the same seed.
-  const positions = new Float32Array(RAIN_DROPS * 3);
-  for (let i = 0; i < RAIN_DROPS; i++) {
-    positions[i * 3] = (rng.next() - 0.5) * RAIN_AREA;
-    positions[i * 3 + 1] = rng.next() * 30;
-    positions[i * 3 + 2] = (rng.next() - 0.5) * RAIN_AREA;
+  const sun = new THREE.DirectionalLight(0xfff2cc, 2.6);
+  sun.position.set(120, 180, 60);
+  G.scene.add(sun);
+  const hemi = new THREE.HemisphereLight(0xbfd9ff, 0x8a7a5a, 1.1);
+  G.scene.add(hemi);
+  const ambient = new THREE.AmbientLight(0xffffff, 0.35);
+  G.scene.add(ambient);
+  G.scene.background = new THREE.Color(PALETTE.skyDay);
+  G.scene.fog = new THREE.Fog(PALETTE.skyDay, 80, WEATHER.fogClear);
+
+  // Rain streaks: a Points cloud in a box around the player, recycled as the
+  // drops fall past the ground.
+  const RAIN_COUNT = 500;
+  const rainPos = new Float32Array(RAIN_COUNT * 3);
+  for (let i = 0; i < RAIN_COUNT; i += 1) {
+    rainPos[i * 3] = G.rng.range(-60, 60);
+    rainPos[i * 3 + 1] = G.rng.range(0, 60);
+    rainPos[i * 3 + 2] = G.rng.range(-60, 60);
   }
   const rainGeo = new THREE.BufferGeometry();
-  rainGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const rainMat = new THREE.PointsMaterial({
-    color: 0xaaccee, size: 0.18, transparent: true, opacity: 0.55, depthWrite: false,
-  });
-  const rain = new THREE.Points(rainGeo, rainMat);
+  rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
+  const rain = new THREE.Points(
+    rainGeo,
+    new THREE.PointsMaterial({ color: 0xaaccee, size: 0.35, transparent: true, opacity: 0.55 }),
+  );
   rain.visible = false;
   rain.frustumCulled = false;
-  scene.add(rain);
+  G.scene.add(rain);
 
-  const tmpTop = new THREE.Color();
-  const tmpHorizon = new THREE.Color();
-  const tmpFog = new THREE.Color();
-  const tmpWarm = new THREE.Color(0xff9a4a);
-  const dayTop = new THREE.Color(DAY_TOP);
-  const dayHorizon = new THREE.Color(DAY_HORIZON);
-  const nightTop = new THREE.Color(NIGHT_TOP);
-  const nightHorizon = new THREE.Color(NIGHT_HORIZON);
-  const nightFog = new THREE.Color(NIGHT_FOG);
-  const dayFog = new THREE.Color(FOG_COLOR);
-  const goldenHorizon = new THREE.Color(SKY_HORIZON);
+  const skyColor = new THREE.Color();
+  const sunColor = new THREE.Color();
 
-  // The look of an hour: sun elevation drives nightLevel, sun intensity
-  // and colour, the sky gradient and the fog. Golden hour (low sun) gets
-  // the warm horizon from config; night gets the dark palette.
-  function applyHour(hour) {
-    const h = ((hour % 24) + 24) % 24;
-    // Sun elevation: 0 at 06:00 and 18:00, 1 at noon, negative at night.
-    const elev = Math.sin(((h - 6) / 12) * Math.PI);
-    const target = elev <= 0 ? 1 : 1 - Math.min(1, elev * 2.2);
-    nightLevel += (target - nightLevel) * 0.5; // ease toward the target
-    if (Math.abs(target - nightLevel) < 0.01) nightLevel = target;
-    const day = 1 - nightLevel;
-    // Golden hour peaks when the sun is low but still up: |elev| small
-    // and day > 0, so the warm horizon only ever tints daylight.
-    const golden = Math.max(0, 1 - Math.abs(elev) * 3) * day; // warm near sunrise/sunset
-    if (G.sun) {
-      G.sun.intensity = 0.25 + day * 1.95;
-      G.sun.color.setHex(0xffffff).lerp(tmpWarm, golden * 0.8);
-      // The sun swings across the sky with the hour.
-      const sunA = ((h - 6) / 12) * Math.PI;
-      G.sun.position.set(Math.cos(sunA) * -300, Math.max(20, Math.sin(sunA) * 260), 120);
-    }
-    if (G.sky) {
-      tmpTop.copy(nightTop).lerp(dayTop, day);
-      // Golden hour warms the horizon toward the config orange.
-      tmpHorizon.copy(nightHorizon).lerp(dayHorizon, day);
-      tmpHorizon.lerp(goldenHorizon, golden * 0.9);
-      G.sky.material.uniforms.top.value.copy(tmpTop);
-      G.sky.material.uniforms.horizon.value.copy(tmpHorizon);
-    }
-    if (scene.fog) {
-      tmpFog.copy(nightFog).lerp(dayFog, day);
-      scene.fog.color.copy(tmpFog);
-    }
-    if (G.buildings) G.buildings.setNight(nightLevel);
+  function applySky() {
+    // Sun elevation: 0 at 6:00 and 18:00, 1 at noon, negative at night.
+    const elevation = Math.sin(((timeOfDay - 6) / 12) * Math.PI);
+    const dayness = Math.max(0, Math.min(1, elevation * 2.2 + 0.25));
+    skyColor.copy(NIGHT_COLOR).lerp(DAY_COLOR, dayness);
+    if (raining) skyColor.lerp(new THREE.Color(0x5a6672), 0.45);
+    G.scene.background.copy(skyColor);
+    G.scene.fog.color.copy(skyColor);
+    sunColor.copy(NIGHT_SUN).lerp(DAY_SUN, dayness);
+    sun.color.copy(sunColor);
+    sun.intensity = 0.35 + dayness * 2.3;
+    hemi.intensity = 0.35 + dayness * 0.8;
+    ambient.intensity = 0.22 + dayness * 0.2;
+    const azimuth = ((timeOfDay - 6) / 12) * Math.PI;
+    sun.position.set(Math.cos(azimuth) * 220, Math.max(25, Math.sin(azimuth) * 220), 90);
+    const fogFar = raining ? WEATHER.fogRain : WEATHER.fogClear;
+    G.scene.fog.far = fogFar;
+    G.scene.fog.near = fogFar * 0.18;
+    grip = raining ? WEATHER.rainGrip : 1;
+    G.timeOfDay = timeOfDay;
   }
 
-  function setMode(next) {
-    mode = next;
-    const raining = next === 'rain';
-    rain.visible = raining;
-    if (scene.fog) {
-      scene.fog.near = raining ? RAIN_FOG_NEAR : FOG_NEAR;
-      scene.fog.far = raining ? RAIN_FOG_FAR : FOG_FAR;
-    }
-    if (G.audio) G.audio.setRain(raining);
-    timer = raining
-      ? rng.range(WEATHER_RAIN_MIN, WEATHER_RAIN_MAX)
-      : rng.range(WEATHER_CLEAR_MIN, WEATHER_CLEAR_MAX);
-    if (raining) emit('toast', { text: 'Rain — the roads are slick!' });
-    else emit('toast', { text: 'The rain cleared' });
+  function setTimeOfDay(h) {
+    timeOfDay = ((h % 24) + 24) % 24;
+    applySky();
   }
 
-  // Pin the clock (URL flag or a shot stage) — the day/night cycle then
-  // holds that hour instead of following game time.
-  function setTimeOfDay(hour) {
-    forcedHour = hour;
-    applyHour(hour);
+  function setRain(on) {
+    raining = on;
+    rain.visible = on;
+    applySky();
   }
 
   function update(dt) {
-    timer -= dt;
-    if (timer <= 0) setMode(mode === 'clear' ? 'rain' : 'clear');
-    const hour = forcedHour !== null ? forcedHour : (G.state.timeMin / 60);
-    applyHour(hour);
-    // Rain dims the sun further on top of the time-of-day look.
-    if (mode === 'rain' && G.sun) G.sun.intensity = Math.min(G.sun.intensity, 1.1);
-    if (mode !== 'rain') return;
-    // Recentre the rain box on the player and let the drops fall.
-    const pp = G.state.inCar && G.state.car ? G.state.car.pos : G.player.pos;
-    rain.position.set(pp.x, 0, pp.z);
-    const pos = rainGeo.attributes.position.array;
-    for (let i = 0; i < RAIN_DROPS; i++) {
-      pos[i * 3 + 1] -= 30 * dt;
-      pos[i * 3] -= 4 * dt; // slight wind
-      if (pos[i * 3 + 1] < 0) {
-        pos[i * 3 + 1] = 30;
-        pos[i * 3] = (rng.next() - 0.5) * RAIN_AREA;
-        pos[i * 3 + 2] = (rng.next() - 0.5) * RAIN_AREA;
-      }
+    timeOfDay = (timeOfDay + (dt / WEATHER.dayLength) * 24) % 24;
+    rainTimer -= dt;
+    if (rainTimer <= 0) {
+      rainTimer = G.rng.range(60, 180);
+      setRain(G.rng.chance(WEATHER.rainChance));
     }
-    rainGeo.attributes.position.needsUpdate = true;
+    applySky();
+    if (raining) {
+      rain.position.set(G.player.pos.x, 0, G.player.pos.z);
+      for (let i = 0; i < RAIN_COUNT; i += 1) {
+        rainPos[i * 3 + 1] -= 42 * dt;
+        if (rainPos[i * 3 + 1] < 0) {
+          rainPos[i * 3 + 1] = 60;
+          rainPos[i * 3] = G.rng.range(-60, 60);
+          rainPos[i * 3 + 2] = G.rng.range(-60, 60);
+        }
+      }
+      rainGeo.attributes.position.needsUpdate = true;
+    }
   }
 
+  applySky();
   return {
-    get raining() { return mode === 'rain'; },
-    get gripFactor() { return mode === 'rain' ? RAIN_GRIP_FACTOR : 1; },
-    get nightLevel() { return nightLevel; },
-    setTimeOfDay, setMode, update,
+    get timeOfDay() {
+      return timeOfDay;
+    },
+    get raining() {
+      return raining;
+    },
+    get grip() {
+      return grip;
+    },
+    setTimeOfDay,
+    setRain,
+    update,
   };
 }
