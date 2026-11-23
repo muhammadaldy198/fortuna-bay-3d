@@ -1,88 +1,88 @@
-// Save / load for Fortuna Bay v2. One localStorage slot, one schema version.
-// Every access is guarded: in a sandboxed or private context localStorage
-// can throw, and the game must still boot and play without a save.
-// Schema v2 adds the photo-mode preference and the spotlight-escape counter.
-import { SAVE_KEY, START_CASH } from './config.js';
+// Saving: the player's progress (money, health, wanted level, mission,
+// garage, position) lives in localStorage under SAVE_KEY, guarded so a
+// browser with storage off simply plays without saving. Saves are plain
+// JSON, versioned, and validated on load — a corrupt or foreign save is
+// ignored, never trusted. Every field saveGame writes, applySave restores.
 
-const SAVE_VERSION = 2;
+import { SAVE_KEY, BEST_KEY } from './config.js';
 
-// The fresh-game save shape. All fields are plain JSON values.
-export function defaultSave() {
-  return {
-    version: SAVE_VERSION,
-    cash: START_CASH,
-    respect: 0,
-    missionsDone: [],
-    missionIndex: 0,
-    garage: [],
-    pos: null, // { x, z, yaw } or null = default spawn
-    weapon: 'pistol',
-    radio: 0,
-    bestRace: null, // best race time in seconds, or null
-    packages: [], // ids of collected hidden packages
-    photoGrid: false, // photo mode rule-of-thirds grid on/off
-    heliEscapes: 0, // times the player escaped the FALCON-1 spotlight
-  };
-}
-
-// Read the save, or null when there is none / it is unreadable / wrong version.
-// Each field is validated and falls back to its default, so a save written
-// by an older build (or hand-edited) can never crash the game. Array entries
-// are type-checked too — a hand-edited save with a string where an id belongs
-// is filtered out instead of breaking mission lookup later.
+/** Read the raw save object, or null when there is none or it is invalid. */
 export function loadSave() {
   try {
-    const raw = localStorage.getItem(SAVE_KEY);
+    const raw = window.localStorage.getItem(SAVE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    if (!data || data.version !== SAVE_VERSION) return null;
-    const fresh = defaultSave();
-    const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
-    const arr = (v) => (Array.isArray(v) ? v : []);
-    const numArr = (v) => arr(v).filter((x) => typeof x === 'number' && Number.isFinite(x));
-    const strArr = (v) => arr(v).filter((x) => typeof x === 'string');
-    // Garage entries are OBJECTS { kind, color, upgrades } (see garage.js
-    // storeCar) — filtering them as strings would silently drop every
-    // stored car on load. Validate the shape instead.
-    const garageArr = (v) => arr(v).filter((g) => g && typeof g === 'object'
-      && typeof g.kind === 'string' && typeof g.color === 'number')
-      .map((g) => ({ kind: g.kind, color: g.color, upgrades: num(g.upgrades, 0) }));
-    return {
-      version: SAVE_VERSION,
-      cash: num(data.cash, fresh.cash),
-      respect: num(data.respect, 0),
-      missionsDone: numArr(data.missionsDone),
-      missionIndex: Math.max(0, num(data.missionIndex, 0)),
-      garage: garageArr(data.garage),
-      pos: data.pos && typeof data.pos.x === 'number' && typeof data.pos.z === 'number'
-        ? { x: data.pos.x, z: data.pos.z, yaw: typeof data.pos.yaw === 'number' ? data.pos.yaw : Math.PI }
-        : null,
-      weapon: typeof data.weapon === 'string' ? data.weapon : fresh.weapon,
-      radio: num(data.radio, 0),
-      bestRace: typeof data.bestRace === 'number' ? data.bestRace : null,
-      packages: numArr(data.packages), // package ids are NUMBERS (city.js), not strings
-      photoGrid: typeof data.photoGrid === 'boolean' ? data.photoGrid : false,
-      heliEscapes: Math.max(0, num(data.heliEscapes, 0)),
-    };
+    if (!data || typeof data !== 'object' || data.version !== 1) return null;
+    return data;
   } catch {
     return null;
   }
 }
 
-// Write the save. Returns true on success, false when storage is unavailable.
-export function writeSave(data) {
+/** Write the current progress of world G to storage. */
+export function saveGame(G) {
   try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    const data = {
+      version: 1,
+      money: G.money,
+      health: G.player ? G.player.health : 100,
+      wanted: G.wanted,
+      missionIndex: G.mission ? G.mission.index : 0,
+      missionsDone: G.mission ? G.mission.done : [],
+      garage: G.garage ? G.garage.stored.map((c) => c.model) : [],
+      position: G.player ? { x: G.player.pos.x, z: G.player.pos.z } : { x: 0, z: 0 },
+      timeOfDay: G.timeOfDay,
+      savedAt: G.frame,
+    };
+    window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
     return true;
   } catch {
     return false;
   }
 }
 
+/** Remove the save entirely. */
 export function clearSave() {
   try {
-    localStorage.removeItem(SAVE_KEY);
+    window.localStorage.removeItem(SAVE_KEY);
+    return true;
   } catch {
-    // No storage, nothing to clear.
+    return false;
+  }
+}
+
+/** Apply a loaded save to world G (money, health, wanted, mission, garage, spot). */
+export function applySave(G, data) {
+  if (!data) return false;
+  G.money = typeof data.money === 'number' ? data.money : G.money;
+  if (G.player && typeof data.health === 'number') G.player.health = data.health;
+  if (G.police && typeof data.wanted === 'number') G.police.setWanted(data.wanted);
+  else if (typeof data.wanted === 'number') G.wanted = Math.max(0, Math.min(5, Math.floor(data.wanted)));
+  if (G.mission && typeof data.missionIndex === 'number') G.mission.index = data.missionIndex;
+  if (G.mission && Array.isArray(data.missionsDone)) G.mission.done = data.missionsDone;
+  if (G.garage && Array.isArray(data.garage)) G.garage.restore(data.garage);
+  if (G.player && data.position) {
+    G.player.pos.x = data.position.x || 0;
+    G.player.pos.z = data.position.z || 0;
+  }
+  if (typeof data.timeOfDay === 'number') G.timeOfDay = data.timeOfDay;
+  return true;
+}
+
+/** The best (highest money ever banked) across visits. */
+export function readBest() {
+  try {
+    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function writeBest(value) {
+  try {
+    window.localStorage.setItem(BEST_KEY, String(value));
+    return true;
+  } catch {
+    return false;
   }
 }
