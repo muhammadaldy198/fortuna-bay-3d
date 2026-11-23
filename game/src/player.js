@@ -1,10 +1,11 @@
 // The player on foot: a boxy character with a walk cycle, and the
 // over-shoulder camera. Driving lives in vehicles.js; this module owns the
-// camera whenever the player is on foot.
+// camera whenever the player is on foot. v2: the camera shakes slightly
+// when FALCON-1's rotor wash beats down overhead.
 // Conventions: yaw is a heading, forward = (sin yaw, cos yaw), so yaw = PI
 // faces north (-Z). The camera sits behind the player along camYaw.
 import * as THREE from 'three';
-import { PLAYER_RADIUS, SPRINT_SPEED, WALK_SPEED } from './config.js';
+import { HELI, PLAYER_RADIUS, SPRINT_SPEED, WALK_SPEED } from './config.js';
 
 export function createPlayer(G) {
   const { scene, city, input } = G;
@@ -36,7 +37,8 @@ export function createPlayer(G) {
   group.add(legR);
   const armL = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.62, 0.2), jacketMat);
   armL.position.set(-0.37, 1.15, 0);
-  group.add(armL);  const armR = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.62, 0.2), jacketMat);
+  group.add(armL);
+  const armR = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.62, 0.2), jacketMat);
   armR.position.set(0.37, 1.15, 0);
   group.add(armR);
   const shoeL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.1, 0.34), shoeMat);
@@ -65,6 +67,7 @@ export function createPlayer(G) {
   let aiming = false;
   let walkPhase = 0;
   let camPos = new THREE.Vector3(0, 4, 308);
+  let shakeT = 0;
 
   function forward() {
     return { x: Math.sin(yaw), z: Math.cos(yaw) };
@@ -76,6 +79,19 @@ export function createPlayer(G) {
     camYaw = newYaw;
     group.position.copy(pos);
     group.rotation.y = yaw;
+  }
+
+  // Rotor wash shakes the camera when the heli is low and overhead: the
+  // closer and lower it is, the harder the shake (0..1).
+  function washShake() {
+    if (!G.police || !G.police.heliPos) return 0;
+    const h = G.police.heliPos();
+    if (!h) return 0;
+    const d = Math.hypot(h.x - pos.x, h.z - pos.z);
+    if (d > HELI.WASH_RADIUS * 1.6 || h.alt > 40) return 0;
+    const near = 1 - d / (HELI.WASH_RADIUS * 1.6);
+    const low = 1 - Math.max(0, h.alt - 15) / 25;
+    return Math.max(0, near) * Math.max(0, low);
   }
 
   function update(dt, active) {
@@ -137,7 +153,7 @@ export function createPlayer(G) {
     }
   }
 
-  function updateCamera(camera) {
+  function updateCamera(camera, dt = 0.016) {
     // Over-shoulder: behind along camYaw, up, and a touch to the side.
     // Aiming pulls the camera in close.
     const back = aiming ? 2.8 : 4.4;
@@ -155,8 +171,17 @@ export function createPlayer(G) {
     target.x = cx;
     target.z = cz;
     target.y = Math.max(1.2, target.y);
+    // The lerp factor assumes the fixed 1/60 s step from main.js — the
+    // camera eases instead of snapping, but never lags more than a frame.
     camPos.lerp(target, 1 - Math.pow(0.001, 1 / 60));
     camera.position.copy(camPos);
+    // Rotor wash jitter: small, fast, scaled by the heli's proximity.
+    shakeT += dt;
+    const shake = washShake();
+    if (shake > 0.02) {
+      camera.position.x += Math.sin(shakeT * 47) * 0.06 * shake;
+      camera.position.y += Math.sin(shakeT * 61 + 1.3) * 0.05 * shake;
+    }
     camera.lookAt(pos.x + bx * 2, 1.5, pos.z + bz * 2);
   }
 
