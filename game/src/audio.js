@@ -1,6 +1,7 @@
-// Synthesized audio for Fortuna Bay — WebAudio only, no audio files.
+// Synthesized audio for Fortuna Bay v2 — WebAudio only, no audio files.
 // Everything is a no-op until init() runs from a user gesture (browsers block
-// audio before that). Engine hum, two-tone siren, gunshots, radio, rain.
+// audio before that). Engine hum, two-tone siren, gunshots, radio, rain,
+// rotor thump (FALCON-1) and the spotlight capture alarm.
 import { RADIO_STATIONS } from './config.js';
 
 export function createAudio() {
@@ -14,6 +15,9 @@ export function createAudio() {
   let sirenPhase = 0;
   let rainSrc = null;
   let rainGain = null;
+  let rotorNodes = null; // { src, gain, lfo, lfoGain, level }
+  let alarmOn = false;
+  let alarmPhase = 0;
   let station = 0;
   let radioOn = false;
   let stepT = 0;
@@ -128,7 +132,8 @@ export function createAudio() {
         const s = Math.max(0, Math.min(1, speed || 0));
         engineOsc.frequency.value = 55 + s * 90;
         engineSub.frequency.value = 27 + s * 45;
-        engineGain.gain.value = 0.05 + s * 0.05;
+        // Smooth the gain so a hard throttle change doesn't click.
+        engineGain.gain.setTargetAtTime(0.05 + s * 0.05, now(), 0.08);
       }
     },
 
@@ -152,6 +157,54 @@ export function createAudio() {
         sirenOsc = null;
         sirenGain = null;
       }
+    },
+
+    // Rotor thump (v2): looped low noise amplitude-modulated at the blade
+    // pass rate (~11 Hz for a 4-blade rotor). level 0..1 fades with the
+    // heli's distance from the player.
+    setRotor(on, level = 1) {
+      if (!ctx) return;
+      if (on && !rotorNodes) {
+        const len = ctx.sampleRate * 2;
+        const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        src.loop = true;
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = 220;
+        const gain = ctx.createGain();
+        gain.gain.value = 0.5;
+        const lfo = ctx.createOscillator();
+        lfo.type = 'sine';
+        lfo.frequency.value = 11;
+        const lfoGain = ctx.createGain();
+        lfoGain.gain.value = 0.4;
+        lfo.connect(lfoGain).connect(gain.gain);
+        src.connect(filter).connect(gain).connect(master);
+        src.start();
+        lfo.start();
+        rotorNodes = { src, gain, lfo, lfoGain, level: 0 };
+      }
+      if (!on && rotorNodes) {
+        try { rotorNodes.src.stop(); rotorNodes.lfo.stop(); } catch { /* already stopped */ }
+        rotorNodes = null;
+        return;
+      }
+      if (rotorNodes) {
+        const target = 0.5 * Math.max(0, Math.min(1, level));
+        rotorNodes.gain.gain.setTargetAtTime(target, now(), 0.15);
+        rotorNodes.level = target;
+      }
+    },
+
+    // Spotlight capture alarm (v2): urgent two-tone beeps while the player
+    // is inside the searchlight pool and the capture timer is past 3 s.
+    setCaptureAlarm(on) {
+      alarmOn = !!on;
+      if (!on) alarmPhase = 0;
     },
 
     // Looping rain noise (filtered white noise) while it rains.
@@ -227,6 +280,15 @@ export function createAudio() {
       if (sirenOsc) {
         sirenPhase += dt;
         sirenOsc.frequency.value = Math.floor(sirenPhase / 0.4) % 2 === 0 ? 700 : 950;
+      }
+      // Capture alarm: a beep every 0.35 s while armed — fast enough to
+      // read as urgent, slow enough to stay distinct from the siren.
+      if (alarmOn) {
+        alarmPhase += dt;
+        if (alarmPhase >= 0.35) {
+          alarmPhase = 0;
+          blip(1200, 0.12, 0.12, 'square');
+        }
       }
       // Radio sequencer.
       if (radioOn) {
