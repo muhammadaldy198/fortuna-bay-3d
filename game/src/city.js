@@ -1,303 +1,137 @@
-// City data for Fortuna Bay v2 — generated from one seed, deterministic.
-// Blocks, buildings, colliders, landmarks, spawn points, packages, race
-// route. Rendering lives in buildings.js / props.js; this file is pure data.
-// Collision is AABB for buildings and circles for trees, lamps and cranes.
-// v2 adds: two helipads + the Ocean Plaza (from config), destructible
-// hydrants, and a collider lookup so props can disable a collider when its
-// furniture gets knocked down.
-import { BLOCK, GRID, HALF, HELIPADS, PLAZA, ROAD, blockCenter, districtAt, nearestRoad, roadLine } from './config.js';
-import { createRandom, hash2 } from './random.js';
+// The city itself: a seeded grid of streets and blocks on a square island.
+// Roads run north-south and east-west every CITY.block metres; the cells
+// between them are buildable blocks. Everything other modules need to know
+// about the map — where the roads are, where a random road point is, which
+// district a position sits in — comes from here. The ground, sea and beach
+// wear the painted textures from textures.js (created before the city).
 
-// Nothing may leave this radius from the island centre (the ground plane is
-// 1120 m wide, so 540 keeps the player on sand, not swimming).
-export const ISLAND_LIMIT = 540;
+import * as THREE from 'three';
+import { CITY } from './config.js';
 
-// Landmark blocks: [blockI, blockJ, key, name, w, d, h, floors, color, style].
-// The lighthouse and the beach are not blocks — they live outside the grid.
-const LANDMARK_BLOCKS = [
-  [6, 5, 'tower', 'Fortuna Tower', 24, 24, 120, 34, 0x7a9cc8, 'glass'],
-  [7, 12, 'casino', 'Casino Fortuna', 26, 20, 14, 3, 0xd8b060, 'casino'],
-  [3, 11, 'safehouse', 'Safehouse', 14, 12, 8, 2, 0xe8d8b8, 'villa'],
-  [9, 8, 'gunshop', 'Ironworks Guns', 12, 10, 7, 1, 0x8a7a6a, 'shop'],
-  [5, 5, 'police', 'FBPD Headquarters', 20, 16, 18, 5, 0x9ab0c8, 'civic'],
-  [10, 6, 'hospital', 'Fortuna General', 18, 16, 16, 4, 0xf0f0e8, 'civic'],
-  [12, 6, 'port', 'Port Fortuna', 28, 20, 10, 1, 0x98a8a8, 'ware'],
-  [1, 12, 'marina', 'Marina Club', 14, 12, 10, 2, 0xa8c8b8, 'pastel'],
-];
+/**
+ * Create the city for world G. Builds the ground, the sea ring, the beach and
+ * the street surfaces, and returns the map API:
+ * - roads: [{ axis: 'x'|'z', at: number }] — the centrelines
+ * - blocks: [{ x0, z0, x1, z1, cx, cz, district }] — buildable cells
+ * - nearestRoad(x, z) — the closest point on any road centreline
+ * - isRoad(x, z) — true when the point is on asphalt
+ * - randomRoadPoint(rng) — a random point on a random road
+ * - districtAt(x, z) — the district name for a position
+ * - bounds — the island's half-size
+ */
+export function createCity(G) {
+  const half = CITY.size / 2;
+  const roadLines = [];
+  for (let at = -half; at <= half; at += CITY.block) roadLines.push(at);
 
-// Building size ranges per district style: [minW, maxW, minH, maxH, cells].
-// Cells are the 2x2 slots inside a block (offsets ±9 m); warehouses take the
-// whole block instead.
-const STYLE_SIZES = {
-  villa: [8, 13, 6, 10, 4],
-  glass: [14, 20, 30, 80, 2],
-  terra: [8, 11, 9, 16, 4],
-  pastel: [10, 16, 12, 30, 3],
-  ware: [18, 28, 8, 12, 1],
-  mid: [10, 16, 15, 30, 3],
-  casino: [26, 26, 14, 14, 1],
-  shop: [12, 12, 7, 7, 1],
-  civic: [18, 20, 16, 18, 1],
-};
+  const roads = [];
+  for (const at of roadLines) {
+    roads.push({ axis: 'x', at });
+    roads.push({ axis: 'z', at });
+  }
 
-const SLOT_OFFSETS = [[-9, -9], [9, -9], [-9, 9], [9, 9]];
-
-export function createCity(seed) {
-  const rng = createRandom(seed);
   const blocks = [];
-  const buildings = [];
-  const colliders = []; // { x, z, hw, hd } boxes or { x, z, r } circles
-  const trees = [];
-  const lamps = [];
-  const hydrants = [];
-
-  const landmarkAt = new Map();
-  for (const [i, j, key] of LANDMARK_BLOCKS) landmarkAt.set(`${i},${j}`, key);
-
-  function addBuilding(x, z, w, d, h, floors, color, style, landmark = null) {
-    const b = { x, z, w, d, h, floors, color, style, ry: hash2(Math.round(x), Math.round(z), seed) < 0.5 ? 0 : Math.PI / 2, landmark };
-    buildings.push(b);
-    // A rotated building swaps its footprint for collision purposes.
-    const rotated = b.ry !== 0;
-    colliders.push({ x, z, hw: (rotated ? d : w) / 2, hd: (rotated ? w : d) / 2 });
-    return b;
-  }
-
-  for (let i = 0; i < GRID; i++) {
-    for (let j = 0; j < GRID; j++) {
-      const district = districtAt(i, j);
-      const [cx, cz] = blockCenter(i, j);
-      blocks.push({ i, j, x: cx, z: cz, district: district.name, style: district.style });
-      // Cleared blocks: the plaza and the helipads sit on open ground —
-      // no buildings and no trees, or the fountain would grow a tower.
-      const cleared = Math.hypot(cx - PLAZA.x, cz - PLAZA.z) < 30
-        || HELIPADS.some((pad) => Math.hypot(cx - pad.x, cz - pad.z) < 30);
-      if (cleared) continue;
-      const landmarkKey = landmarkAt.get(`${i},${j}`);
-      if (landmarkKey) {
-        const [, , , , w, d, h, floors, color, style] = LANDMARK_BLOCKS.find((l) => l[2] === landmarkKey);
-        addBuilding(cx, cz, w, d, h, floors, color, style, landmarkKey);
-        continue;
-      }
-      const [minW, maxW, minH, maxH, cells] = STYLE_SIZES[district.style] || STYLE_SIZES.mid;
-      const slots = cells === 1 ? [[0, 0]] : SLOT_OFFSETS.slice(0, cells);
-      for (const [ox, oz] of slots) {
-        if (rng.chance(0.15)) continue; // an empty lot now and then
-        const w = rng.range(minW, maxW);
-        const d = rng.range(minW, maxW);
-        const h = rng.range(minH, maxH);
-        const floors = Math.max(1, Math.min(district.maxFloors, Math.round(h / 3.4)));
-        const tone = rng.range(0.85, 1.1);
-        const color = shadeInt(district.color, tone);
-        addBuilding(cx + ox + rng.range(-2, 2), cz + oz + rng.range(-2, 2), w, d, h, floors, color, district.style);
-      }
-      // Trees on the sidewalk ring around the block.
-      const treeCount = rng.int(0, 2);
-      for (let t = 0; t < treeCount; t++) {
-        const side = rng.int(0, 3);
-        const along = rng.range(-BLOCK / 2, BLOCK / 2);
-        const off = BLOCK / 2 + 1.5;
-        let tx = cx;
-        let tz = cz;
-        if (side === 0) { tx += along; tz -= off; }
-        if (side === 1) { tx += along; tz += off; }
-        if (side === 2) { tx -= off; tz += along; }
-        if (side === 3) { tx += off; tz += along; }
-        trees.push({ x: tx, z: tz, s: rng.range(0.8, 1.3), palm: hash2(Math.round(tx), Math.round(tz), seed) < 0.6 });
-        colliders.push({ x: tx, z: tz, r: 0.4 });
-      }
+  const lot = CITY.block - CITY.roadWidth;
+  for (let ix = 0; ix < roadLines.length - 1; ix += 1) {
+    for (let iz = 0; iz < roadLines.length - 1; iz += 1) {
+      const x0 = roadLines[ix] + CITY.roadWidth / 2;
+      const z0 = roadLines[iz] + CITY.roadWidth / 2;
+      blocks.push({
+        x0,
+        z0,
+        x1: x0 + lot,
+        z1: z0 + lot,
+        cx: x0 + lot / 2,
+        cz: z0 + lot / 2,
+        district: districtAt(x0 + lot / 2, z0 + lot / 2),
+      });
     }
   }
 
-  // Lamps at every other intersection.
-  for (let i = 0; i <= GRID; i++) {
-    for (let j = 0; j <= GRID; j++) {
-      if ((i + j) % 2 !== 0) continue;
-      const x = roadLine(i) + ROAD / 2 + 1.5;
-      const z = roadLine(j) + ROAD / 2 + 1.5;
-      lamps.push({ x, z });
-      colliders.push({ x, z, r: 0.3 });
+  function nearestRoad(x, z) {
+    let bestX = roadLines[0];
+    let bestZ = roadLines[0];
+    for (const line of roadLines) {
+      if (Math.abs(x - line) < Math.abs(x - bestX)) bestX = line;
+      if (Math.abs(z - line) < Math.abs(z - bestZ)) bestZ = line;
     }
+    if (Math.abs(x - bestX) <= Math.abs(z - bestZ)) return { x: bestX, z };
+    return { x, z: bestZ };
   }
 
-  // Hydrants (v2, destructible): on the opposite corner of every third
-  // intersection, so a chase can smash one and open a geyser.
-  for (let i = 0; i <= GRID; i++) {
-    for (let j = 0; j <= GRID; j++) {
-      if ((i + j) % 3 !== 0) continue;
-      const x = roadLine(i) - ROAD / 2 - 1.5;
-      const z = roadLine(j) - ROAD / 2 - 1.5;
-      const collider = { x, z, r: 0.35 };
-      hydrants.push({ x, z, collider });
-      colliders.push(collider);
+  function isRoad(x, z) {
+    const halfRoad = CITY.roadWidth / 2;
+    for (const line of roadLines) {
+      if (Math.abs(x - line) <= halfRoad || Math.abs(z - line) <= halfRoad) return true;
     }
+    return false;
   }
 
-  // Boardwalk palms: a row of tall palms along the beachfront promenade
-  // (visible from the malecón in the city screenshot).
-  for (let x = -HALF + 20; x <= HALF - 20; x += 18) {
-    const px = x + rng.range(-2, 2);
-    const pz = HALF + 8;
-    trees.push({ x: px, z: pz, s: rng.range(1.2, 1.5), palm: true });
-    colliders.push({ x: px, z: pz, r: 0.4 });
+  function randomRoadPoint(rng) {
+    const road = rng.pick(roads);
+    const along = rng.range(-half + 20, half - 20);
+    if (road.axis === 'x') return { x: road.at, z: along };
+    return { x: along, z: road.at };
   }
 
-  // Landmarks: the named places missions, the minimap and the HUD refer to.
-  const landmarks = {};
-  for (const [i, j, key, name] of LANDMARK_BLOCKS) {
-    const [x, z] = blockCenter(i, j);
-    landmarks[key] = { x, z, name };
+  function districtAt(x, z) {
+    if (z > CITY.beachZ - 60) return 'Marina';
+    if (x > half - 120) return 'Harbor East';
+    if (Math.abs(x) < 90 && Math.abs(z) < 90) return 'Downtown';
+    if (x < -half + 120 && z < 0) return 'Old Port';
+    if (z < -half + 120) return 'North Hills';
+    return 'The Strip';
   }
-  landmarks.lighthouse = { x: -HALF - 60, z: HALF + 40, name: 'Isla Light' };
-  landmarks.beach = { x: 0, z: HALF + 30, name: 'Fortuna Beach' };
-  landmarks.plaza = { x: PLAZA.x, z: PLAZA.z, name: 'Ocean Plaza' };
-  colliders.push({ x: landmarks.lighthouse.x, z: landmarks.lighthouse.z, r: 4 });
-  // Port cranes (props.js builds them at the same spots).
-  for (let k = 0; k < 3; k++) {
-    colliders.push({ x: 300 + k * 40, z: -140, r: 3 });
-  }
-  // Plaza fountain (props.js builds it at the same spot).
-  colliders.push({ x: PLAZA.x, z: PLAZA.z, r: 4 });
 
-  // 10 hidden packages: near landmarks and at the city corners.
-  const packageSpots = [
-    [landmarks.tower.x + 16, landmarks.tower.z + 16],
-    [landmarks.casino.x - 18, landmarks.casino.z - 18],
-    [landmarks.safehouse.x + 14, landmarks.safehouse.z],
-    [landmarks.gunshop.x, landmarks.gunshop.z + 14],
-    [landmarks.police.x - 16, landmarks.police.z + 16],
-    [landmarks.hospital.x + 16, landmarks.hospital.z - 16],
-    [landmarks.port.x - 20, landmarks.port.z + 20],
-    [landmarks.marina.x, landmarks.marina.z - 18],
-    [landmarks.lighthouse.x + 12, landmarks.lighthouse.z - 12],
-    [-HALF + 30, -HALF + 30],
-  ];
-  const packages = packageSpots.map(([x, z], id) => ({ id, x, z }));
+  // Ground: a dirt-coloured base plane for the island, a textured sea plane
+  // beyond it, and a textured sand strip for the beach.
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(CITY.size + 80, CITY.size + 80),
+    new THREE.MeshLambertMaterial({ color: 0x55504a }),
+  );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = 0;
+  G.scene.add(ground);
 
-  // Race route: an 8-checkpoint loop around the mid-city roads.
-  const race = {
-    checkpoints: [
-      [162, 0], [162, 162], [0, 162], [-162, 162],
-      [-162, 0], [-162, -162], [0, -162], [162, -162],
-    ],
-  };
+  const sea = new THREE.Mesh(
+    new THREE.PlaneGeometry(CITY.size * 4, CITY.size * 4),
+    new THREE.MeshLambertMaterial({ color: 0xffffff, map: G.textures.water }),
+  );
+  sea.rotation.x = -Math.PI / 2;
+  sea.position.y = CITY.waterLevel;
+  G.scene.add(sea);
 
-  // Jump ramps: beach, port, hills.
-  const ramps = [
-    { x: 120, z: HALF + 20, ry: 0 },
-    { x: 320, z: -60, ry: Math.PI / 2 },
-    { x: -200, z: -HALF + 40, ry: Math.PI },
-  ];
+  const sand = new THREE.Mesh(
+    new THREE.PlaneGeometry(CITY.size + 80, 70),
+    new THREE.MeshLambertMaterial({ color: 0xffffff, map: G.textures.sand }),
+  );
+  sand.rotation.x = -Math.PI / 2;
+  sand.position.set(0, 0.05, half + 18);
+  G.scene.add(sand);
 
-  // Push a circle (x, z, radius r) out of every collider it overlaps, then
-  // clamp it to the island. Returns the corrected [x, z]. Colliders flagged
-  // disabled (knocked-down furniture) are skipped.
-  function collideCircle(x, z, r) {
-    for (const c of colliders) {
-      if (c.disabled) continue;
-      if (c.r !== undefined) {
-        const dx = x - c.x;
-        const dz = z - c.z;
-        const dist = Math.hypot(dx, dz);
-        const min = r + c.r;
-        if (dist < min && dist > 0.0001) {
-          x = c.x + (dx / dist) * min;
-          z = c.z + (dz / dist) * min;
-        }
-      } else {
-        const nx = Math.max(c.x - c.hw, Math.min(x, c.x + c.hw));
-        const nz = Math.max(c.z - c.hd, Math.min(z, c.z + c.hd));
-        const dx = x - nx;
-        const dz = z - nz;
-        const dist = Math.hypot(dx, dz);
-        if (dist < r) {
-          if (dist > 0.0001) {
-            x = nx + (dx / dist) * r;
-            z = nz + (dz / dist) * r;
-          } else {
-            // Centre inside the box: push out along the smallest penetration.
-            const px = c.hw + r - Math.abs(x - c.x);
-            const pz = c.hd + r - Math.abs(z - c.z);
-            if (px < pz) x = c.x + (x >= c.x ? c.hw + r : -c.hw - r);
-            else z = c.z + (z >= c.z ? c.hd + r : -c.hd - r);
-          }
-        }
-      }
+  // The street surfaces: one plane per road, just above the ground, wearing
+  // the dashed asphalt texture. A shared material keeps draw calls low.
+  const streetMat = new THREE.MeshLambertMaterial({ color: 0xffffff, map: G.textures.asphalt });
+  for (const road of roads) {
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(CITY.size, CITY.roadWidth), streetMat);
+    plane.rotation.x = -Math.PI / 2;
+    if (road.axis === 'x') {
+      plane.position.set(road.at, 0.02, 0);
+      plane.rotation.z = Math.PI / 2;
+    } else {
+      plane.position.set(0, 0.02, road.at);
     }
-    const d = Math.hypot(x, z);
-    if (d > ISLAND_LIMIT) {
-      x = (x / d) * ISLAND_LIMIT;
-      z = (z / d) * ISLAND_LIMIT;
-    }
-    return [x, z];
-  }
-
-  // The circle collider at exactly (x, z), or undefined. Props uses it to
-  // disable the collider of a lamp or tree it knocks down.
-  function colliderAt(x, z) {
-    return colliders.find((c) => c.r !== undefined && c.x === x && c.z === z);
-  }
-
-  // True when (x, z) is on a road: within half a road width of a road line
-  // in either axis. Uses the shared nearestRoad from config — the local
-  // copy that used to live here drifted once already; one source of truth.
-  function isOnRoad(x, z) {
-    const rx = Math.abs(x - nearestRoad(x));
-    const rz = Math.abs(z - nearestRoad(z));
-    return rx < ROAD / 2 || rz < ROAD / 2;
-  }
-
-  function randomRoadPoint(rngStream) {
-    const k = rngStream.int(0, GRID);
-    const t = rngStream.range(-HALF + 20, HALF - 20);
-    return rngStream.chance(0.5) ? [roadLine(k), t] : [t, roadLine(k)];
-  }
-
-  function randomSidewalkPoint(rngStream) {
-    const i = rngStream.int(0, GRID - 1);
-    const j = rngStream.int(0, GRID - 1);
-    const [cx, cz] = blockCenter(i, j);
-    const side = rngStream.int(0, 3);
-    const along = rngStream.range(-BLOCK / 2, BLOCK / 2);
-    const off = BLOCK / 2 + 1.5;
-    if (side === 0) return [cx + along, cz - off];
-    if (side === 1) return [cx + along, cz + off];
-    if (side === 2) return [cx - off, cz + along];
-    return [cx + off, cz + along];
-  }
-
-  // Line of sight: true when the segment between two points crosses no
-  // building footprint. Sampled every 2 m against the building AABBs, so
-  // enemies (and cops) can't shoot the player through a tower. A rotated
-  // building (ry = 90°) swaps its footprint — the same swap addBuilding
-  // applies to its collider — so the check uses the rotated half-extents.
-  function hasLineOfSight(x0, z0, x1, z1) {
-    const dist = Math.hypot(x1 - x0, z1 - z0);
-    const steps = Math.max(1, Math.ceil(dist / 2));
-    for (let i = 1; i < steps; i++) {
-      const t = i / steps;
-      const x = x0 + (x1 - x0) * t;
-      const z = z0 + (z1 - z0) * t;
-      for (const b of buildings) {
-        const hw = (b.ry !== 0 ? b.d : b.w) / 2;
-        const hd = (b.ry !== 0 ? b.w : b.d) / 2;
-        if (Math.abs(x - b.x) < hw && Math.abs(z - b.z) < hd) return false;
-      }
-    }
-    return true;
+    G.scene.add(plane);
   }
 
   return {
-    seed, blocks, buildings, colliders, trees, lamps, hydrants, landmarks, packages, race, ramps,
-    helipads: HELIPADS, plaza: PLAZA,
-    collideCircle, colliderAt, isOnRoad, randomRoadPoint, randomSidewalkPoint, hasLineOfSight,
+    roads,
+    blocks,
+    roadLines,
+    bounds: half,
+    nearestRoad,
+    isRoad,
+    randomRoadPoint,
+    districtAt,
   };
-}
-
-// Multiply a hex colour's channels by f (clamped to 255).
-function shadeInt(hex, f) {
-  const r = Math.min(255, Math.round(((hex >> 16) & 255) * f));
-  const g = Math.min(255, Math.round(((hex >> 8) & 255) * f));
-  const b = Math.min(255, Math.round((hex & 255) * f));
-  return (r << 16) | (g << 8) | b;
 }
