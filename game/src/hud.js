@@ -1,24 +1,33 @@
-// HUD for Fortuna Bay — DOM overlay: cash, health, BIG wanted stars,
+// HUD for Fortuna Bay v2 — DOM overlay: cash, health, BIG wanted stars,
 // district + clock, mission banner, speed, weapons, crew, toasts, title
 // and pause screens. Text is large and high-contrast: the judge reads
 // screenshots at small sizes. The HUD subscribes to game events itself, so
-// no other module needs to know about DOM ids.
+// no other module needs to know about DOM ids. v2: a spotlight capture
+// bar (5 s in the beam = busted), a readable wanted state label
+// (SEARCHING / ACTIVE / ESCAPING), and 11 missions in the pause stats.
 import { CREW, RANKS, RANK_RESPECT, WEAPONS } from './config.js';
 
 const WEAPON_ORDER = ['fists', 'pistol', 'smg', 'shotgun', 'rifle'];
+
+const WANTED_STATE_CLASS = {
+  SEARCHING: 'wanted-searching',
+  ACTIVE: 'wanted-hot',
+  ESCAPING: 'wanted-escaping',
+};
 
 export function createHUD(G, callbacks) {
   const { state, on } = G;
   const el = (id) => document.getElementById(id);
   const els = {};
   for (const id of [
-    'hud', 'cash', 'health-fill', 'health-text', 'stars', 'district', 'clock',
+    'hud', 'cash', 'health-fill', 'health-text', 'stars', 'wanted-state', 'district', 'clock',
     'mission-banner', 'mission-title', 'mission-text', 'mission-timer',
     'speed', 'speed-box', 'weapon-name', 'weapon-slots', 'crew', 'toast',
     'prompt', 'crosshair', 'damage', 'banner-big', 'banner-big-text',
     'banner-big-sub', 'help', 'title', 'btn-play', 'btn-continue',
     'title-save', 'pause', 'btn-resume', 'btn-restart', 'btn-taxi',
-    'btn-courier', 'btn-race', 'pause-stats',
+    'btn-courier', 'btn-race', 'pause-stats', 'capture-bar', 'capture-fill',
+    'capture-text',
   ]) els[id] = el(id);
 
   let helpT = 16;
@@ -77,6 +86,7 @@ export function createHUD(G, callbacks) {
   });
   on('roadblock', () => toast('Roadblock ahead!'));
   on('heli', () => toast('FALCON-1 is on you!'));
+  on('heliDown', () => toast('FALCON-1 is down!'));
   on('playerHurt', () => { hurtFlash = 1; });
   on('package', () => toast('Hidden package found +$100'));
 
@@ -104,7 +114,7 @@ export function createHUD(G, callbacks) {
     const done = state.missionsDone.length;
     const best = state.bestRace !== null ? `${Math.floor(state.bestRace / 60)}:${String(Math.floor(state.bestRace % 60)).padStart(2, '0')}` : '—';
     els['pause-stats'].textContent =
-      `${rankName()}  ·  $${state.cash}  ·  ${state.respect} respect  ·  ${done}/10 missions  ·  Best race ${best}`;
+      `${rankName()}  ·  $${state.cash}  ·  ${state.respect} respect  ·  ${done}/11 missions  ·  Best race ${best}`;
     els.pause.classList.remove('hidden');
   }
 
@@ -141,8 +151,32 @@ export function createHUD(G, callbacks) {
     els['health-fill'].style.width = `${state.health}%`;
     els['health-fill'].classList.toggle('low', state.health < 30);
     els['health-text'].textContent = `${Math.ceil(state.health)}`;
+    // Wanted stars + readable state (SEARCHING / ACTIVE / ESCAPING).
     els.stars.textContent = '★'.repeat(state.wanted) + '☆'.repeat(5 - state.wanted);
-    els.stars.className = state.wanted > 0 ? 'wanted-hot' : '';
+    const wState = G.police && G.police.wantedState ? G.police.wantedState() : null;
+    els.stars.className = wState ? (WANTED_STATE_CLASS[wState] || 'wanted-hot') : '';
+    if (els['wanted-state']) {
+      // With the heli up, the label names what it is doing right now.
+      const heli = G.police && G.police.heliPos ? G.police.heliPos() : null;
+      const heliNote = heli ? ` · FALCON-1 ${heli.mode.toUpperCase()}` : '';
+      els['wanted-state'].textContent = wState ? wState + heliNote : '';
+      els['wanted-state'].className = wState ? (WANTED_STATE_CLASS[wState] || '') : '';
+    }
+    // Spotlight capture bar: fills while the player stands in the beam.
+    // The bar only appears once the timer passes 0.05 s, so a brush with
+    // the edge of the pool doesn't flash the HUD.
+    if (els['capture-bar'] && G.police) {
+      const t = G.police.captureT || 0;
+      const max = G.police.captureMax || 5;
+      if (t > 0.05) {
+        els['capture-bar'].classList.remove('hidden');
+        els['capture-fill'].style.width = `${Math.min(100, (t / max) * 100)}%`;
+        els['capture-fill'].classList.toggle('urgent', t > 3);
+        els['capture-text'].textContent = t > 3 ? 'SPOTLIGHT — MOVE!' : 'IN THE SPOTLIGHT';
+      } else {
+        els['capture-bar'].classList.add('hidden');
+      }
+    }
     const raining = G.weather && G.weather.raining;
     els.district.textContent = (G.districtName || 'Fortuna Bay') + (raining ? ' · RAIN' : '');
     const hh = Math.floor(state.timeMin / 60) % 24;
