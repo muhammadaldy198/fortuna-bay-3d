@@ -1,9 +1,14 @@
-// Missions for Fortuna Bay — 10 story missions (data-driven steps), 3
+// Missions for Fortuna Bay v2 — 11 story missions (data-driven steps), 3
 // repeatable side jobs (taxi, courier, street race). Each step has one
 // objective; the beacon, minimap blip and HUD banner all read the current
 // step. Fail states: timer, death, busted, target lost/spotted.
 // Step types: go, driveTo, pickup, deliver, enterCar, steal, checkpoint,
-// kill, rampage, survive, evade, tail, chase.
+// kill, rampage, survive, evade, tail, chase, spotlight.
+// v2: mission 11 "Out of the Light" (stay out of FALCON-1's searchlight),
+// and a v1 bug fixed — survive/tail/spotlight steps used to FAIL when
+// their timer ran out, which is exactly when they should COMPLETE. The
+// courier's drop order is shuffled (rng.shuffle), so the route differs
+// every run instead of following generation order.
 import * as THREE from 'three';
 
 export const MISSIONS = [
@@ -87,7 +92,18 @@ export const MISSIONS = [
       { type: 'go', at: 'lighthouse', text: 'Meet Mama Rosa at Isla Light' },
     ],
   },
+  {
+    id: 10, name: 'Out of the Light', giver: 'Vex', reward: 1500, respect: 250,
+    brief: "FALCON-1 is overhead with its searchlight. Stay out of the light for 60 seconds — 5 seconds in the beam and you're busted.",
+    steps: [
+      { type: 'spotlight', time: 60, text: 'Stay out of the searchlight' },
+    ],
+  },
 ];
+
+// Step types where the timer running out means SUCCESS (survived the
+// duration), not failure. Everything else with a timer fails on timeout.
+const TIMER_COMPLETES = new Set(['survive', 'tail', 'spotlight']);
 
 export function createMissions(G) {
   const { scene, city, vehicles, combat, rng, state, emit, on } = G;
@@ -181,6 +197,10 @@ export function createMissions(G) {
       case 'evade':
         if (step.stars && state.wanted < step.stars) G.police.setWanted(step.stars);
         break;
+      case 'spotlight':
+        // 3 stars puts FALCON-1 in the air; the capture timer does the rest.
+        if (state.wanted < 3) G.police.setWanted(3);
+        break;
       case 'tail': {
         const pp = playerPos();
         // Spawn the target 25–45 m away on a road — never inside the
@@ -257,11 +277,17 @@ export function createMissions(G) {
     ring.visible = false;
   }
 
+  // One place that builds the per-mission runtime state (startMission and
+  // startSideJob used to duplicate this literal).
+  function newActive(def) {
+    return { def, stepIdx: 0, step: null, timer: null, marker: null, spawned: [], targetCar: null, bossCar: null };
+  }
+
   function startMission(id) {
     const def = MISSIONS[id];
     if (!def) return false;
     if (active) cleanup();
-    active = { def, stepIdx: 0, step: null, timer: null, marker: null, spawned: [], targetCar: null, bossCar: null };
+    active = newActive(def);
     startStep(0);
     emit('missionStart', { mission: def });
     return true;
@@ -289,7 +315,7 @@ export function createMissions(G) {
         ],
       };
     } else if (kind === 'courier') {
-      const points = [0, 1, 2].map(() => city.randomRoadPoint(rng));
+      const points = rng.shuffle([0, 1, 2].map(() => city.randomRoadPoint(rng)));
       def = {
         name: 'Courier Run', giver: 'Dispatch', reward: 180, respect: 20, side: 'courier',
         brief: 'Three drops, 120 seconds.',
@@ -304,7 +330,7 @@ export function createMissions(G) {
     } else {
       return false;
     }
-    active = { def, stepIdx: 0, step: null, timer: null, marker: null, spawned: [], targetCar: null, bossCar: null };
+    active = newActive(def);
     startStep(0);
     emit('missionStart', { mission: def });
     return true;
@@ -322,11 +348,15 @@ export function createMissions(G) {
     const step = active.step;
     const pp = playerPos();
 
-    // Timer.
+    // Timer: for survive/tail/spotlight steps the timer running out means
+    // the player held out — the step COMPLETES. For timed races and
+    // rampages it means failure. (v1 failed everything on timeout, which
+    // made "Heat Wave" and "Tail the Rat" unwinnable.)
     if (active.timer !== null) {
       active.timer -= dt;
       if (active.timer <= 0) {
-        fail('Time ran out');
+        if (TIMER_COMPLETES.has(step.type)) nextStep();
+        else fail('Time ran out');
         return;
       }
     }
@@ -395,6 +425,10 @@ export function createMissions(G) {
       }
       case 'evade':
         if (state.wanted === 0) nextStep();
+        break;
+      case 'spotlight':
+        // The capture timer in police.js does the failing (busted event);
+        // surviving until the timer runs out completes the step.
         break;
       case 'tail': {
         const car = active.targetCar;
@@ -465,6 +499,7 @@ export function createMissions(G) {
     if (step.type === 'kill') text += ` (${active.kills}/${step.count})`;
     if (step.type === 'rampage') text += ` (${active.wrecked}/${step.count})`;
     if (step.type === 'checkpoint') text += ` (${active.cpIdx}/${step.points.length})`;
+    if (step.type === 'spotlight' && active.timer !== null) text += ` (${Math.ceil(active.timer)}s)`;
     return text;
   }
 
