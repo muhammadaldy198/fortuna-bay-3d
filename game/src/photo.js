@@ -1,112 +1,85 @@
-// Photo mode for Fortuna Bay v2 (NEW) — press O to freeze the action and
-// fly a drone camera: WASD to move, Q/E down/up, mouse to orbit, scroll to
-// zoom (FOV 25–90), G toggles the rule-of-thirds grid, O or Esc exits.
-// The HUD hides while photo mode is active, so the frame is clean. The
-// game world keeps simulating underneath — the heli keeps flying, traffic
-// keeps moving — so a shot can catch the city mid-chase.
-import * as THREE from 'three';
-import { ISLAND, PHOTO } from './config.js';
+// Photo mode: freeze the simulation, hide the HUD, and fly a free camera
+// with WASD plus the mouse. C cycles the filter, R rises, F sinks. P or Esc
+// leaves photo mode and the game resumes exactly where it stopped.
 
+import { ACTION_CAMERA } from './input.js';
+
+const FILTERS = ['', 'sepia(0.35) saturate(1.3)', 'saturate(0.4) brightness(1.1)', 'contrast(1.25) saturate(1.4)'];
+
+/**
+ * Create photo mode for world G. Returns:
+ * - active — is photo mode on
+ * - pos, yaw, pitch — the free camera state
+ * - toggle() — enter/leave photo mode
+ * - update(dt) — move the free camera from input
+ */
 export function createPhoto(G) {
-  const { camera, input, state } = G;
   let active = false;
-  let grid = false;
-  const drone = new THREE.Vector3();
-  let yaw = Math.PI;
-  let pitch = -0.15;
-  let fov = PHOTO.FOV_DEFAULT;
-  let savedFov = 70;
-
-  const gridEl = document.getElementById('photo-grid');
-  const hintEl = document.getElementById('photo-hint');
-  const hudEl = document.getElementById('hud');
-  // One reusable direction vector: toggle() and updateCamera() both need
-  // a camera direction, and allocating a Vector3 per frame is wasteful.
-  const tmpDir = new THREE.Vector3();
+  let filterIndex = 0;
+  const pos = { x: 0, y: 10, z: 0 };
+  let yaw = 0;
+  let pitch = -0.25;
 
   function toggle() {
     active = !active;
     if (active) {
-      // Start from the current camera: position, heading and pitch.
-      drone.copy(camera.position);
-      const dir = tmpDir;
-      camera.getWorldDirection(dir);
-      yaw = Math.atan2(dir.x, dir.z);
-      pitch = Math.asin(Math.max(-1, Math.min(1, dir.y)));
-      savedFov = camera.fov;
-      fov = PHOTO.FOV_DEFAULT;
-      camera.fov = fov;
-      camera.updateProjectionMatrix();
-      if (hudEl) hudEl.classList.add('hidden');
-      if (gridEl) gridEl.classList.toggle('hidden', !grid);
-      if (hintEl) hintEl.classList.remove('hidden');
-      input.takeMouse();
-      input.takeWheel();
+      pos.x = G.camera.position.x;
+      pos.y = G.camera.position.y;
+      pos.z = G.camera.position.z;
+      yaw = G.cameraYaw || 0;
+      if (G.hud) G.hud.setVisible(false);
+      const hint = document.getElementById('photo-hint');
+      if (hint) hint.style.display = 'block';
     } else {
-      camera.fov = savedFov;
-      camera.updateProjectionMatrix();
-      if (hudEl) hudEl.classList.remove('hidden');
-      if (gridEl) gridEl.classList.add('hidden');
-      if (hintEl) hintEl.classList.add('hidden');
-      // Release pointer lock, otherwise the mouse stays trapped in the
-      // canvas after leaving photo mode (input.js implements releasePointer).
-      if (typeof input.releasePointer === 'function') input.releasePointer();
+      if (G.hud) G.hud.setVisible(true);
+      const hint = document.getElementById('photo-hint');
+      if (hint) hint.style.display = 'none';
+      G.renderer.domElement.style.filter = '';
+      filterIndex = 0;
     }
     return active;
   }
 
   function update(dt) {
     if (!active) return;
-    // Mouse orbit.
-    const mouse = input.takeMouse();
-    yaw -= mouse.x * PHOTO.ORBIT_SENS;
-    pitch = Math.max(-1.4, Math.min(1.4, pitch - mouse.y * PHOTO.ORBIT_SENS));
-    // Scroll zoom: FOV 25 (telephoto) to 90 (wide).
-    const wheel = input.takeWheel();
-    if (wheel !== 0) {
-      fov = Math.max(PHOTO.FOV_MIN, Math.min(PHOTO.FOV_MAX, fov + wheel * 0.05));
-      camera.fov = fov;
-      camera.updateProjectionMatrix();
-    }
-    // Drone movement, camera-relative.
-    const ax = input.axis();
-    const fast = input.held('ShiftLeft') || input.held('ShiftRight');
-    const speed = (fast ? PHOTO.DRONE_FAST : PHOTO.DRONE_SPEED) * dt;
+    const move = G.input.move();
+    const mouse = G.input.takeMouse();
+    yaw -= mouse.dx * 0.003;
+    pitch = Math.max(-1.2, Math.min(1.2, pitch - mouse.dy * 0.003));
+    const speed = G.input.sprint() ? 40 : 14;
     const fx = Math.sin(yaw);
     const fz = Math.cos(yaw);
-    const rx = -fz; // right vector of the camera heading
-    const rz = fx;
-    drone.x += (fx * ax.y + rx * ax.x) * speed;
-    drone.z += (fz * ax.y + rz * ax.x) * speed;
-    if (input.held('KeyE')) drone.y += speed;
-    if (input.held('KeyQ')) drone.y -= speed;
-    // Stay over the island: the drone must not fly out past the sea where
-    // there is nothing to photograph (and no ground to stand the shot on).
-    const bound = ISLAND / 2 - 10;
-    drone.x = Math.max(-bound, Math.min(bound, drone.x));
-    drone.z = Math.max(-bound, Math.min(bound, drone.z));
-    drone.y = Math.max(0.5, Math.min(300, drone.y));
-    // Grid toggle.
-    if (input.pressed('KeyG')) {
-      grid = !grid;
-      if (gridEl) gridEl.classList.toggle('hidden', !grid);
+    const rx = Math.cos(yaw);
+    const rz = -Math.sin(yaw);
+    pos.x += (rx * move.x + fx * move.z) * speed * dt;
+    pos.z += (rz * move.x + fz * move.z) * speed * dt;
+    if (G.input.held('KeyR')) pos.y += speed * dt;
+    if (G.input.held('KeyF')) pos.y -= speed * dt;
+    const actions = G.input.takeActions();
+    if (actions & ACTION_CAMERA) {
+      filterIndex = (filterIndex + 1) % FILTERS.length;
+      G.renderer.domElement.style.filter = FILTERS[filterIndex];
     }
-  }
-
-  function updateCamera(cam) {
-    cam.position.copy(drone);
-    const dir = tmpDir.set(
-      Math.sin(yaw) * Math.cos(pitch),
-      Math.sin(pitch),
-      Math.cos(yaw) * Math.cos(pitch),
+    G.camera.position.set(pos.x, pos.y, pos.z);
+    G.camera.lookAt(
+      pos.x + Math.sin(yaw) * Math.cos(pitch),
+      pos.y + Math.sin(pitch),
+      pos.z + Math.cos(yaw) * Math.cos(pitch),
     );
-    cam.lookAt(drone.x + dir.x, drone.y + dir.y, drone.z + dir.z);
   }
 
   return {
-    get active() { return active; },
-    get grid() { return grid; },
-    setGrid(v) { grid = !!v; },
-    toggle, update, updateCamera,
+    get active() {
+      return active;
+    },
+    pos,
+    get yaw() {
+      return yaw;
+    },
+    get pitch() {
+      return pitch;
+    },
+    toggle,
+    update,
   };
 }
