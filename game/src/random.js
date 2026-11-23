@@ -1,6 +1,6 @@
-// Seeded randomness for Fortuna Bay. The whole city, the traffic palette and
-// the mission staging are deterministic for a given seed, so a screenshot
-// taken with ?seed=1 can be reproduced exactly. Two tools:
+// Seeded randomness for Fortuna Bay v2. The city, the traffic palette, the
+// mission staging and the heli behaviour are deterministic for a given seed,
+// so a screenshot taken with ?seed=1 can be reproduced exactly. Two tools:
 //  - mulberry32 / createRandom: a small stream you pull from in order.
 //  - hash2: a position hash, stable no matter what order you ask in.
 
@@ -30,13 +30,33 @@ export function createRandom(seed) {
     int(min, max) {
       return Math.floor(next() * (max - min + 1)) + min;
     },
-    // One element of arr, uniformly.
+    // One element of arr, uniformly (undefined for an empty array).
     pick(arr) {
+      if (!arr.length) return undefined;
       return arr[Math.floor(next() * arr.length)];
     },
     // True with probability p.
     chance(p) {
       return next() < p;
+    },
+    // A shuffled COPY of arr (Fisher-Yates), so mission staging order varies
+    // per seed without mutating the caller's list.
+    shuffle(arr) {
+      const out = arr.slice();
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(next() * (i + 1));
+        const tmp = out[i];
+        out[i] = out[j];
+        out[j] = tmp;
+      }
+      return out;
+    },
+    // Approximately normal value (mean 0, stddev ~1) via Box-Muller, for
+    // natural variation such as traffic speed spread.
+    gauss() {
+      let u = 0;
+      while (u === 0) u = next();
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * next());
     },
     // An independent stream derived from this one.
     fork() {
