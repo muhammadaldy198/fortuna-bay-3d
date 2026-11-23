@@ -1,124 +1,88 @@
-// Garage + safehouse for Fortuna Bay — store cars, respray, upgrade the
-// engine, heal up and save at the Safehouse. The zone is a 16 m radius
-// around the safehouse; actions are triggered by keys (main.js) and the
-// prompt text tells the player what is available right now. The respray
-// colour comes from the seeded stream, so a save/load round-trip never
-// changes the paint job.
+// The garage: a Marina lock-up where the player stores cars they like.
+// Park a car inside the zone and sit still for three seconds — it is stored
+// (and leaves the world). Walk into the zone on foot and the most recently
+// stored car rolls back out beside the player. Stored models persist through
+// save.js.
+
+import * as THREE from 'three';
+
+const GARAGE = { x: 0, z: 232, w: 26, d: 18 };
+
+/**
+ * Create the garage for world G. Returns:
+ * - stored — [{ model }] in store order
+ * - restore(models) — rebuild the stored list from a save
+ * - update(dt)
+ */
 export function createGarage(G) {
-  const { city, state, rng, emit } = G;
-  const safe = city.landmarks.safehouse;
-  const ZONE_RADIUS = 16;
-  const RESPRAY_COST = 50;
-  const UPGRADE_COST = 300;
-  const MAX_UPGRADES = 3;
+  const stored = [];
+  let parkTimer = 0;
+  let retrieveCooldown = 0;
 
-  function playerPos() {
-    if (state.inCar && state.car) return state.car.pos;
-    return G.player.pos;
+  // The building: a wide low box with a striped door, plus a sign.
+  const shell = new THREE.Mesh(
+    new THREE.BoxGeometry(GARAGE.w, 7, GARAGE.d),
+    new THREE.MeshLambertMaterial({ color: 0x7a6a55 }),
+  );
+  shell.position.set(GARAGE.x, 3.5, GARAGE.z);
+  G.scene.add(shell);
+  const door = new THREE.Mesh(
+    new THREE.BoxGeometry(GARAGE.w * 0.7, 4.5, 0.3),
+    new THREE.MeshLambertMaterial({ color: 0x3a3f45 }),
+  );
+  door.position.set(GARAGE.x, 2.25, GARAGE.z - GARAGE.d / 2 - 0.2);
+  G.scene.add(door);
+  const sign = new THREE.Mesh(
+    new THREE.BoxGeometry(10, 1.6, 0.4),
+    new THREE.MeshBasicMaterial({ color: 0x22d3ee }),
+  );
+  sign.position.set(GARAGE.x, 8, GARAGE.z - GARAGE.d / 2 - 0.2);
+  G.scene.add(sign);
+
+  function inside(x, z) {
+    return Math.abs(x - GARAGE.x) < GARAGE.w / 2 && Math.abs(z - GARAGE.z) < GARAGE.d / 2;
   }
 
-  function inZone() {
-    const pp = playerPos();
-    return Math.hypot(pp.x - safe.x, pp.z - safe.z) < ZONE_RADIUS;
+  function restore(models) {
+    stored.length = 0;
+    for (const model of models) stored.push({ model });
   }
 
-  // What the prompt bar should say right now ('' = nothing available).
-  function prompt() {
-    if (!inZone()) return '';
-    if (state.inCar && state.car) {
-      const car = state.car;
-      const parts = ['[G] Store car'];
-      parts.push(`[H] Respray $${RESPRAY_COST}`);
-      if ((car.upgrades || 0) < MAX_UPGRADES) parts.push(`[J] Engine +10% ($${UPGRADE_COST})`);
-      return parts.join('  ');
+  function update(dt) {
+    retrieveCooldown = Math.max(0, retrieveCooldown - dt);
+    const player = G.player;
+    if (player.car) {
+      // Parked in the zone: count down, then store the car.
+      if (inside(player.pos.x, player.pos.z) && Math.abs(player.car.speed) < 0.5) {
+        parkTimer += dt;
+        if (G.hud && parkTimer < 3) G.hud.setObjective(`Storing ${player.car.model}… ${Math.ceil(3 - parkTimer)}`);
+        if (parkTimer >= 3) {
+          stored.push({ model: player.car.model });
+          G.vehicles.removeCar(player.car);
+          player.car = null;
+          player.mesh.visible = true;
+          parkTimer = 0;
+          if (G.hud) {
+            G.hud.banner('Stored in the garage');
+            G.hud.setObjective(`Garage: ${stored.length} car${stored.length === 1 ? '' : 's'} stored.`);
+          }
+          if (G.audio) G.audio.coin();
+        }
+      } else {
+        parkTimer = 0;
+      }
+      return;
     }
-    if (state.garage.length > 0) {
-      const kinds = state.garage.map((g) => g.kind).join(', ');
-      return `[G] Take car out (${state.garage.length} stored: ${kinds})  ·  Safehouse — health restored`;
-    }
-    return 'Safehouse — health restored';
-  }
-
-  function storeCar() {
-    if (!inZone() || !state.inCar || !state.car) return false;
-    const car = state.car;
-    state.garage.push({ kind: car.kind, color: car.color, upgrades: car.upgrades || 0 });
-    G.vehicles.removeCar(car);
-    state.inCar = false;
-    state.car = null;
-    if (G.player) {
-      // Step out east of the safehouse (14 m clears its 14 m footprint —
-      // the old +4 put the player INSIDE the building).
-      G.player.setPos(safe.x + 14, safe.z, Math.PI);
-      G.player.group.visible = true;
-    }
-    if (G.audio) G.audio.setEngine(false, 0);
-    emit('toast', { text: 'Car stored in the garage' });
-    if (G.saveGame) G.saveGame();
-    return true;
-  }
-
-  function takeOut() {
-    if (!inZone() || state.inCar || state.garage.length === 0) return false;
-    const stored = state.garage.shift();
-    // Park it east of the safehouse, clear of the 14 m footprint.
-    const car = G.vehicles.spawnCar(stored.kind, safe.x + 14, safe.z + 2, Math.PI, {
-      driver: null, color: stored.color,
-    });
-    car.upgrades = stored.upgrades || 0;
-    car.maxSpeed *= 1 + 0.1 * car.upgrades;
-    emit('toast', { text: 'Car taken out of the garage' });
-    if (G.saveGame) G.saveGame();
-    return true;
-  }
-
-  function respray() {
-    if (!inZone() || !state.inCar || !state.car) return false;
-    if (state.cash < RESPRAY_COST) {
-      emit('toast', { text: `Respray costs $${RESPRAY_COST}` });
-      return false;
-    }
-    state.cash -= RESPRAY_COST;
-    // A fixed palette (not a random hex): the colour is chosen from the
-    // seeded stream, so a save/load round-trip never changes the paint job.
-    const palette = [0xc84444, 0x4488c8, 0xe8e8e8, 0x44a868, 0xd8a83c, 0x8855aa, 0x333333, 0xe88a4a];
-    const newColor = palette[Math.floor(rng.next() * palette.length)];
-    state.car.color = newColor;
-    if (state.car.bodyMat) state.car.bodyMat.color.setHex(newColor);
-    emit('toast', { text: 'Resprayed — fresh paint!' });
-    return true;
-  }
-
-  function upgrade() {
-    if (!inZone() || !state.inCar || !state.car) return false;
-    const car = state.car;
-    if ((car.upgrades || 0) >= MAX_UPGRADES) {
-      emit('toast', { text: 'Engine is already maxed out' });
-      return false;
-    }
-    if (state.cash < UPGRADE_COST) {
-      emit('toast', { text: `Engine upgrade costs $${UPGRADE_COST}` });
-      return false;
-    }
-    state.cash -= UPGRADE_COST;
-    car.upgrades = (car.upgrades || 0) + 1;
-    car.maxSpeed *= 1.1;
-    emit('toast', { text: `Engine upgraded — level ${car.upgrades}` });
-    return true;
-  }
-
-  function update() {
-    // On foot in the zone with missing health: heal up and autosave.
-    if (inZone() && !state.inCar && state.health < 100) {
-      state.health = 100;
-      emit('toast', { text: 'Rested at the Safehouse — health restored' });
-      if (G.saveGame) G.saveGame();
+    parkTimer = 0;
+    // On foot in the zone: bring the last stored car out.
+    if (inside(player.pos.x, player.pos.z) && stored.length > 0 && retrieveCooldown <= 0) {
+      const entry = stored.pop();
+      const car = G.vehicles.createCar(entry.model, player.pos.x + 4, player.pos.z + 2, player.heading);
+      retrieveCooldown = 5;
+      if (G.hud) G.hud.message(`${entry.model} rolled out of the garage.`);
+      if (G.audio) G.audio.door();
     }
   }
 
-  return {
-    get inZone() { return inZone(); },
-    get prompt() { return prompt(); },
-    storeCar, takeOut, respray, upgrade, update,
-  };
+  return { stored, restore, update, spot: GARAGE };
 }
