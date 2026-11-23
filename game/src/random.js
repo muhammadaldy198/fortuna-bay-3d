@@ -1,85 +1,66 @@
-// Seeded randomness for Fortuna Bay v2. The city, the traffic palette, the
-// mission staging and the heli behaviour are deterministic for a given seed,
-// so a screenshot taken with ?seed=1 can be reproduced exactly. Two tools:
-//  - mulberry32 / createRandom: a small stream you pull from in order.
-//  - hash2: a position hash, stable no matter what order you ask in.
+// Seeded random numbers for Fortuna Bay: one mulberry32 stream per world, so
+// the same seed always builds the same city, the same traffic and the same
+// pedestrians. Nothing in the simulation uses Math.random or Date — every
+// draw comes from the world's rng, which is what makes the dossier
+// deterministic across runs.
 
-// mulberry32 — tiny, fast, good-enough PRNG. Returns a function that yields
-// a float in [0, 1) on every call.
-export function mulberry32(seed) {
-  let a = seed >>> 0;
+/** A mulberry32 generator: small, fast, and good enough for a game world. */
+function mulberry32(seed) {
+  let state = seed >>> 0;
   return function next() {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
   };
 }
 
-// A convenience wrapper around one mulberry32 stream.
+/**
+ * Create a seeded random source. `seed` is any integer; the same seed gives
+ * the same sequence. Methods:
+ * - next() — a float in [0, 1)
+ * - range(a, b) — a float in [a, b)
+ * - int(a, b) — an integer in [a, b]
+ * - pick(list) — one element of the list
+ * - chance(p) — true with probability p
+ * - fork(salt) — a fresh stream derived from this one (for subsystems that
+ *   need their own sequence without disturbing the parent's).
+ */
 export function createRandom(seed) {
-  const next = mulberry32(seed);
-  return {
-    seed,
-    next,
-    // Float in [min, max).
-    range(min, max) {
-      return min + next() * (max - min);
+  const draw = mulberry32(seed);
+  const source = {
+    seed: seed >>> 0,
+    next() {
+      return draw();
     },
-    // Integer in [min, max] inclusive.
-    int(min, max) {
-      return Math.floor(next() * (max - min + 1)) + min;
+    range(a, b) {
+      return a + draw() * (b - a);
     },
-    // One element of arr, uniformly (undefined for an empty array).
-    pick(arr) {
-      if (!arr.length) return undefined;
-      return arr[Math.floor(next() * arr.length)];
+    int(a, b) {
+      return a + Math.floor(draw() * (b - a + 1));
     },
-    // True with probability p.
+    pick(list) {
+      return list[Math.floor(draw() * list.length)];
+    },
     chance(p) {
-      return next() < p;
+      return draw() < p;
     },
-    // A shuffled COPY of arr (Fisher-Yates), so mission staging order varies
-    // per seed without mutating the caller's list.
-    shuffle(arr) {
-      const out = arr.slice();
-      for (let i = out.length - 1; i > 0; i--) {
-        const j = Math.floor(next() * (i + 1));
-        const tmp = out[i];
-        out[i] = out[j];
-        out[j] = tmp;
-      }
-      return out;
-    },
-    // Approximately normal value (mean 0, stddev ~1) via Box-Muller, for
-    // natural variation such as traffic speed spread.
-    gauss() {
-      let u = 0;
-      while (u === 0) u = next();
-      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * next());
-    },
-    // An independent stream derived from this one.
-    fork() {
-      return createRandom((next() * 0xffffffff) >>> 0);
+    fork(salt) {
+      let mixed = (seed >>> 0) ^ Math.imul(salt | 0, 0x9e3779b1);
+      mixed ^= mixed >>> 16;
+      return createRandom(mixed >>> 0);
     },
   };
+  return source;
 }
 
-// Deterministic 2D hash in [0, 1). The same (x, y, seed) always gives the same
-// value, which is what the city generator uses for per-block and per-window
-// decisions that must not depend on generation order.
-export function hash2(x, y, seed = 1) {
-  let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(seed | 0, 974634211)) | 0;
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+/** Clamp a number into [low, high]. */
+export function clamp(value, low, high) {
+  return value < low ? low : value > high ? high : value;
 }
 
-// Hash a string to a uint32 seed, so ?seed=fortuna works as well as ?seed=1.
-export function seedFromString(str) {
-  let h = 2166136261;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
+/** Linear interpolation between a and b at t in [0, 1]. */
+export function lerp(a, b, t) {
+  return a + (b - a) * t;
 }
