@@ -1,6 +1,10 @@
-// Combat for Fortuna Bay — 5 weapons (fists + 4 guns), hitscan shooting
+// Combat for Fortuna Bay v2 — 5 weapons (fists + 4 guns), hitscan shooting
 // with spread, melee, mission enemies, player health. Hit tests are manual
 // sphere tests against the aim ray (no Raycaster setup, deterministic).
+// v2: FALCON-1 can be shot out of the sky, and the melee hit test no longer
+// divides by zero when an enemy stands exactly on the player. Spread and
+// enemy fire use Math.random on purpose: combat is live gameplay, not part
+// of the seeded deterministic sim (staged screenshots don't fire a shot).
 import * as THREE from 'three';
 import { ENEMY_HEALTH, WEAPONS } from './config.js';
 
@@ -100,7 +104,7 @@ export function createCombat(G) {
         const dx = enemy.pos.x - pp.x;
         const dz = enemy.pos.z - pp.z;
         const d = Math.hypot(dx, dz);
-        if (d < def.range && (dx * fx + dz * fz) / d > 0.5) {
+        if (d < def.range && d > 0.001 && (dx * fx + dz * fz) / d > 0.5) {
           damageEnemy(enemy, def.damage);
           hit = true;
         }
@@ -134,12 +138,29 @@ export function createCombat(G) {
           if (d < bestD) { bestD = d; best = ped; bestKind = 'ped'; }
         }
       }
+      // The heli: shooting upward is approximated by testing the ray
+      // against a tall vertical cylinder around the heli — the aim is
+      // horizontal, so the test uses the heli's ground position with a
+      // generous radius when it is low overhead. Above 45 m it is out of
+      // range by design: you can only shoot FALCON-1 down when it comes low.
+      if (G.police && G.police.heli) {
+        const hp = G.police.heli.group.position;
+        const d = raySphere(origin, dir, { x: hp.x, y: 1.5, z: hp.z }, 3.5, def.range);
+        if (d < bestD && hp.y < 45) { bestD = d; best = 'heli'; bestKind = 'heli'; }
+      }
       const hitX = origin.x + dir.x * bestD;
       const hitZ = origin.z + dir.z * bestD;
       if (bestKind === 'enemy') damageEnemy(best, def.damage);
       else if (bestKind === 'car') damageCar(best, def.damage);
       else if (bestKind === 'ped') emit('pedShot', { ped: best });
-      if (best && G.effects) G.effects.burst({ x: hitX, y: 1.2, z: hitZ }, 0xffcc66, 3, 3);
+      else if (bestKind === 'heli' && G.police) {
+        G.police.damageHeli(def.damage);
+        if (G.effects && G.police.heli) {
+          const hp = G.police.heli.group.position;
+          G.effects.burst({ x: hp.x, y: hp.y, z: hp.z }, 0xffcc66, 4, 3);
+        }
+      }
+      if (best && bestKind !== 'heli' && G.effects) G.effects.burst({ x: hitX, y: 1.2, z: hitZ }, 0xffcc66, 3, 3);
     }
     if (G.audio) G.audio.shot(key);
     if (G.effects) {
@@ -177,17 +198,21 @@ export function createCombat(G) {
   function update(dt) {
     cooldown = Math.max(0, cooldown - dt);
     if (state.screen !== 'play' || state.inCar) return;
-    // Weapon switching.
-    for (const [code, key] of Object.entries(KEY_TO_WEAPON)) {
-      if (input.pressed(code)) selectWeapon(key);
+    // Photo mode owns the mouse: clicking must frame a shot, not fire one.
+    // (Enemies keep moving below — only the player's input is gated.)
+    if (!G.photo || !G.photo.active) {
+      // Weapon switching.
+      for (const [code, key] of Object.entries(KEY_TO_WEAPON)) {
+        if (input.pressed(code)) selectWeapon(key);
+      }
+      if (input.pressed('KeyQ')) cycleWeapon();
+      // Aim with the right mouse button.
+      if (G.player) G.player.setAiming(input.rightDown());
+      // Fire: hold for auto weapons, click (or F) for the rest.
+      const def = WEAPONS[weapon()];
+      const wantFire = def.auto ? input.mouseDown() : (input.takeClick() || input.pressed('KeyF'));
+      if (wantFire) shoot();
     }
-    if (input.pressed('KeyQ')) cycleWeapon();
-    // Aim with the right mouse button.
-    if (G.player) G.player.setAiming(input.rightDown());
-    // Fire: hold for auto weapons, click (or F) for the rest.
-    const def = WEAPONS[weapon()];
-    const wantFire = def.auto ? input.mouseDown() : (input.takeClick() || input.pressed('KeyF'));
-    if (wantFire) shoot();
 
     // Enemies walk at the player and shoot inside 34 m.
     const pp = G.player.pos;
