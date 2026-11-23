@@ -1,9 +1,12 @@
+<!-- Fortuna Bay 3D v2 — GTA 6-inspired open-world crime sandbox. Shot mode:
+     open ?shot=<strip|night|chase|scale>&seed=1 for the four capture shots
+     (see shots.json at the entry root). -->
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Fortuna Bay 3D — a sun-soaked open-world beach city game. Drive, chase, and climb the ranks of Isla Fortuna.">
+<meta name="description" content="Fortuna Bay 3D — a sun-soaked open-world beach city game. Drive, chase, and climb the ranks of Isla Fortuna. Photo mode, a day/night cycle, and FALCON-1 overhead.">
 <title>Fortuna Bay 3D</title>
     <meta name="theme-color" content="#101018">
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ff9a3c'/%3E%3Ctext x='16' y='23' font-size='18' font-family='sans-serif' font-weight='bold' text-anchor='middle' fill='%23101018'%3EFB%3C/text%3E%3C/svg%3E">
@@ -20,8 +23,19 @@
   #cash { font-size: 26px; font-weight: bold; color: #7dd87d; }
   #stars { font-size: 34px; letter-spacing: 4px; color: #888; line-height: 1.1; }
   #stars.wanted-hot { color: #ffd23c; text-shadow: 0 0 12px rgba(255, 210, 60, 0.8); }
+  #stars.wanted-searching { color: #ffe08a; text-shadow: 0 0 10px rgba(255, 224, 138, 0.7); }
+  #stars.wanted-escaping { color: #ff9a3c; text-shadow: 0 0 10px rgba(255, 154, 60, 0.7); }
+  #wanted-state { font-size: 13px; font-weight: bold; letter-spacing: 2px; }
+  #wanted-state.wanted-hot { color: #ffd23c; }
+  #wanted-state.wanted-searching { color: #ffe08a; }
+  #wanted-state.wanted-escaping { color: #ff9a3c; }
   #district { font-size: 15px; color: #ddd; }
   #clock { font-size: 20px; font-weight: bold; }
+  #capture-bar { position: absolute; top: 150px; left: 50%; transform: translateX(-50%); width: 300px; text-align: center; }
+  #capture-text { font-size: 14px; font-weight: bold; letter-spacing: 2px; color: #fff2b0; text-shadow: 0 2px 6px rgba(0,0,0,0.9); margin-bottom: 4px; }
+  #capture-track { height: 12px; background: rgba(255,255,255,0.2); border-radius: 6px; overflow: hidden; }
+  #capture-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #fff2b0, #ffd23c); }
+  #capture-fill.urgent { background: linear-gradient(90deg, #ff6a6a, #ff2222); animation: healthPulse 0.5s infinite; }
   #top-left { position: absolute; top: 12px; left: 12px; }
   #health-bar { width: 220px; height: 16px; background: rgba(255,255,255,0.2); border-radius: 8px; overflow: hidden; }
   #health-fill { height: 100%; width: 100%; background: linear-gradient(90deg, #4ad04a, #7dd87d); transition: width 0.2s; }
@@ -55,6 +69,12 @@
   #help { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); font-size: 13px; color: #ddd; background: rgba(10,10,18,0.55); padding: 6px 12px; border-radius: 6px; white-space: nowrap; }
   #fullmap-wrap { position: absolute; inset: 0; background: rgba(5,5,12,0.85); display: flex; align-items: center; justify-content: center; z-index: 20; }
   #fullmap { border: 3px solid rgba(255,255,255,0.4); border-radius: 8px; }
+  /* Photo mode rule-of-thirds grid (outside #hud so it stays visible). */
+  #photo-grid { position: fixed; inset: 0; pointer-events: none; z-index: 15; }
+  #photo-grid::before, #photo-grid::after { content: ''; position: absolute; background: rgba(255,255,255,0.5); }
+  #photo-grid::before { left: 33.33%; top: 0; width: 1px; height: 100%; box-shadow: 33.33vw 0 0 rgba(255,255,255,0.5); }
+  #photo-grid::after { top: 33.33%; left: 0; height: 1px; width: 100%; box-shadow: 0 33.33vh 0 rgba(255,255,255,0.5); }
+  #photo-hint { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); font-size: 13px; color: #fff; background: rgba(10,10,18,0.6); padding: 6px 12px; border-radius: 6px; pointer-events: none; z-index: 15; white-space: nowrap; }
 
   /* ---- Title & pause ---- */
   .screen { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center; background: linear-gradient(180deg, rgba(20,20,40,0.55), rgba(20,10,20,0.85)); text-align: center; }
@@ -78,6 +98,8 @@
 <body>
 <canvas id="game"></canvas>
 <div id="status" aria-live="polite" style="position:absolute;left:-9999px"></div>
+<div id="photo-grid" class="hidden"></div>
+<div id="photo-hint" class="hidden">Photo mode — WASD move · Q/E down/up · Mouse orbit · Scroll zoom · G grid · O/Esc exit</div>
 
 <div id="hud" class="hidden">
   <div id="top-left" class="panel">
@@ -87,8 +109,13 @@
   <div id="top-right" class="panel">
     <div id="cash">$250</div>
     <div id="stars">☆☆☆☆☆</div>
+    <div id="wanted-state"></div>
     <div id="district">Fortuna Bay</div>
     <div id="clock">17:30</div>
+  </div>
+  <div id="capture-bar" class="hidden">
+    <div id="capture-text">IN THE SPOTLIGHT</div>
+    <div id="capture-track"><div id="capture-fill"></div></div>
   </div>
   <div id="mission-banner" class="panel hidden">
     <div id="mission-title"></div>
@@ -110,7 +137,7 @@
     <div id="banner-big-text"></div>
     <div id="banner-big-sub"></div>
   </div>
-  <div id="help">WASD drive/walk · E enter car · M mission · Tab map · R radio · Z/X/C crew · G garage · Right-click aim</div>
+  <div id="help">WASD drive/walk · E enter car · M mission · Tab map · R radio · Z/X/C crew · G garage · O photo mode · Right-click aim</div>
   <div id="fullmap-wrap" class="hidden"><canvas id="fullmap" width="720" height="720"></canvas></div>
 </div>
 
@@ -123,7 +150,7 @@
   <div class="controls">
     <b>WASD</b> drive / walk &nbsp;·&nbsp; <b>E</b> enter car &nbsp;·&nbsp; <b>M</b> mission &nbsp;·&nbsp; <b>1–5 / Q</b> weapons<br>
     <b>Mouse</b> look &nbsp;·&nbsp; <b>Click</b> shoot &nbsp;·&nbsp; <b>Right-click</b> aim &nbsp;·&nbsp; <b>Space</b> handbrake<br>
-    <b>Tab</b> map &nbsp;·&nbsp; <b>R</b> radio &nbsp;·&nbsp; <b>Z / X / C</b> crew &nbsp;·&nbsp; <b>G</b> garage &nbsp;·&nbsp; <b>Esc</b> pause
+    <b>Tab</b> map &nbsp;·&nbsp; <b>R</b> radio &nbsp;·&nbsp; <b>Z / X / C</b> crew &nbsp;·&nbsp; <b>G</b> garage &nbsp;·&nbsp; <b>O</b> photo mode &nbsp;·&nbsp; <b>Esc</b> pause
   </div>
 </div>
 
