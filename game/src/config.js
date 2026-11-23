@@ -1,15 +1,15 @@
-// Fortuna Bay — shared constants and world geometry.
-// Everything here is data: no Three.js, no DOM, no side effects. All systems
-// import from this file so the city layout, the driving model and the economy
-// stay consistent in one place. Units: metres, seconds, degrees as radians.
+// Fortuna Bay v2 — shared constants and world geometry.
+// Pure data: no Three.js, no DOM, no side effects. Every system imports from
+// here, so the city layout, the driving model, the heli behaviour and the
+// economy stay consistent in one place. Units: metres, seconds, radians.
 
 export const STEP = 1 / 60;
-export const SAVE_KEY = 'fortuna-bay-save-v1';
+export const SAVE_KEY = 'fortuna-bay-save-v2';
 
 // ---- City grid -------------------------------------------------------------
-// The city is a 14x14 grid of blocks. Each block is 36 m wide with a 12 m road
-// between blocks and a 3 m sidewalk on each side of the road, so one pitch is
-// 54 m and the built-up city spans 756 m. The island (sand + sea) is wider.
+// 14x14 blocks. A block is 36 m wide, roads are 12 m with a 3 m sidewalk on
+// each side, so one pitch is 54 m and the built-up city spans 756 m. The
+// island (sand + sea) is wider than the city itself.
 export const BLOCK = 36;
 export const ROAD = 12;
 export const WALK = 3;
@@ -31,7 +31,8 @@ export function roadLine(k) {
   return (k - GRID / 2) * PITCH;
 }
 
-// Snap a coordinate to the nearest road centreline.
+// Snap a coordinate to the nearest road centreline. v = 0 -> 0, v = 27 -> 54:
+// the rounding offset (GRID/2) maps the half-pitch boundary onto a road line.
 export function nearestRoad(v) {
   return Math.round(v / PITCH + GRID / 2) * PITCH - HALF;
 }
@@ -61,6 +62,20 @@ export function districtAtPos(x, z) {
   return districtAt(i, j);
 }
 
+// ---- Landmarks -------------------------------------------------------------
+// Two ground helipads on cleared blocks (city.js builds nothing there):
+// the police air unit at the harbour (block 12,3), and a marina pad on the
+// west edge (block 0,12). They MUST sit on block centres away from the
+// landmark blocks — the first draft put them on the port warehouse and the
+// marina clubhouse, and the pads painted underneath the buildings.
+export const HELIPADS = [
+  { name: 'Harbour Pad', x: 297, z: -189, radius: 11 },
+  { name: 'Marina Pad', x: -351, z: 297, radius: 11 },
+];
+
+// Circular plaza at the Beachfront / Marina corner — peds gather here.
+export const PLAZA = { x: -135, z: 297, radius: 20 };
+
 // ---- Golden hour -----------------------------------------------------------
 export const SKY_TOP = 0x2e4a7a;
 export const SKY_HORIZON = 0xffb36b;
@@ -86,7 +101,6 @@ export const PLAYER_HEIGHT = 1.8;
 // ---- Driving ---------------------------------------------------------------
 export const CAR_ACCEL = 16;
 export const CAR_BRAKE = 28;
-export const CAR_MAX_SPEED = 38;
 export const CAR_MAX_REVERSE = 12;
 export const CAR_STEER = 1.9;
 export const CAR_GRIP = 6.5;
@@ -117,10 +131,46 @@ export const PED_FLEE_SPEED = 5.5;
 export const WANTED_MAX = 5;
 export const COPS_PER_STAR = [0, 2, 3, 4, 5, 6];
 export const ROADBLOCK_STAR = 4;
-export const HELI_STAR = 5;
+export const HELI_STAR = 3; // v2: FALCON-1 joins at 3 stars, not 5
 export const EVADE_SECONDS = 14;
 export const COP_SPEED = 40;
-export const SIREN_RANGE = 90;
+
+// ---- Helicopter (v2: FALCON-1 is a first-class system) ---------------------
+// The v1 flaw: the heli patrolled high behind the player, outside the chase
+// camera's frustum — it was never in a screenshot. v2 flies it LOW, AHEAD of
+// the player, with staged fly-bys and hover-sweeps, so it is always in frame.
+export const HELI = {
+  PATROL_ALT: 55, // altitude while orbiting high before dropping to track
+  TRACK_ALT: 26, // altitude while tracking the player (wanted 3+) — in frame
+  TRACK_AHEAD: 18, // metres ahead of the player's heading while tracking
+  TRACK_SIDE: 12, // lateral offset while tracking (keeps the heli visible)
+  ORBIT_RADIUS: 45, // patrol orbit radius around its anchor point
+  SPEED: 26, // cruise speed (m/s)
+  FLYBY_MIN: 18, // seconds between staged fly-bys (min)
+  FLYBY_MAX: 26, // seconds between staged fly-bys (max)
+  FLYBY_ALT: 22, // altitude during a fly-by pass
+  FLYBY_LEAD: 45, // how far ahead of the player a fly-by crosses
+  HOVER_MIN: 3, // hover-and-sweep hold time (min seconds)
+  HOVER_MAX: 5, // hover-and-sweep hold time (max seconds)
+  HOVER_DIST: 30, // hover distance in front of the player
+  SPOT_RADIUS: 10, // searchlight pool radius on the ground
+  CAPTURE_SECONDS: 5, // continuous seconds inside the pool = BUSTED
+  WASH_RADIUS: 14, // rotor wash radius on the ground
+  ROTOR_RPM: 320, // visual rotor spin, revolutions per minute (police.js converts to rad/s)
+  CONE_OPACITY: 0.16, // volumetric searchlight cone material opacity
+  SHADOW_SIZE: 18, // blob-shadow disc diameter under the heli (metres)
+  STROBE_INTERVAL: 0.9, // seconds between anti-collision strobe flashes
+};
+
+// ---- Photo mode (v2) -------------------------------------------------------
+export const PHOTO = {
+  FOV_DEFAULT: 55,
+  FOV_MIN: 25,
+  FOV_MAX: 90,
+  DRONE_SPEED: 12, // m/s
+  DRONE_FAST: 30, // m/s while holding Shift
+  ORBIT_SENS: 0.0022, // radians per pixel of mouse drag
+};
 
 // ---- Combat ----------------------------------------------------------------
 export const WEAPONS = {
@@ -158,4 +208,4 @@ export const RADIO_STATIONS = [
   { name: 'NEON 101', desc: 'Night drive', bpm: 128, root: 174.61 },
 ];
 
-export const MISSION_COUNT = 10;
+export const MISSION_COUNT = 11;
