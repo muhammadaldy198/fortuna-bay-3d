@@ -1,14 +1,17 @@
-// Vehicles for Fortuna Bay — boxy cars with arcade driving (velocity vector
-// + grip + handbrake drift), carjacking, damage, police light bars.
+// Vehicles for Fortuna Bay v2 — boxy cars with arcade driving (velocity
+// vector + grip + handbrake drift), carjacking, damage, police light bars.
 // Traffic and police AI steer cars through driveCar(); the player drives the
-// car flagged driver === 'player'.
+// car flagged driver === 'player'. v2: brake lights brighten under braking,
+// indicators blink when traffic turns or pulls over, and a hard crash
+// knocks down nearby street furniture. Civilian paint now comes from the
+// seeded stream (G.rng), so two runs of the same seed paint the same cars.
 // Sign conventions (keep them straight): forward = (sin yaw, cos yaw); a
 // positive steer turns toward +X. The player passes -ax.x as steer, because
 // on screen (chase cam) D must turn toward -X. steerToward returns -cross*2.4.
 import * as THREE from 'three';
 import {
   CAR_ACCEL, CAR_BRAKE, CAR_DRIFT_GRIP, CAR_GRIP, CAR_LENGTH, CAR_MAX_REVERSE,
-  CAR_MAX_SPEED, CAR_STEER, CAR_WIDTH,
+  CAR_STEER, CAR_WIDTH,
 } from './config.js';
 
 const CIVIL_COLORS = [0xc84444, 0x4488c8, 0xe8e8e8, 0x44a868, 0xd8a83c, 0x8855aa, 0x333333, 0xe88a4a];
@@ -45,7 +48,8 @@ export function createVehicles(G) {
       mesh.add(wheel);
       wheels.push(wheel);
     }
-    // Headlights (warm) and taillights (red).
+    // Headlights (warm) and taillights (red). The tail material is kept
+    // per car so braking can brighten it.
     const headMat = new THREE.MeshBasicMaterial({ color: 0xfff2b0 });
     const tailMat = new THREE.MeshBasicMaterial({ color: 0xff2222 });
     for (const sx of [-0.6, 0.6]) {
@@ -56,6 +60,18 @@ export function createVehicles(G) {
       tail.position.set(sx, 0.65, -CAR_LENGTH / 2 - 0.01);
       mesh.add(tail);
     }
+    // Indicators: small amber lamps at the rear corners, blinked by
+    // update() when car.indicator is 'left' or 'right'.
+    const indMatL = new THREE.MeshBasicMaterial({ color: 0xffaa22 });
+    const indMatR = new THREE.MeshBasicMaterial({ color: 0xffaa22 });
+    const indL = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.14, 0.06), indMatL);
+    indL.position.set(-0.85, 0.65, -CAR_LENGTH / 2 - 0.01);
+    indL.visible = false;
+    mesh.add(indL);
+    const indR = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.14, 0.06), indMatR);
+    indR.position.set(0.85, 0.65, -CAR_LENGTH / 2 - 0.01);
+    indR.visible = false;
+    mesh.add(indR);
     let lightBar = null;
     if (kind === 'police') {
       lightBar = new THREE.Group();
@@ -77,21 +93,24 @@ export function createVehicles(G) {
       sign.position.y = 1.7;
       mesh.add(sign);
     }
-    return { mesh, wheels, lightBar, bodyMat };
+    return { mesh, wheels, lightBar, bodyMat, tailMat, indL, indR };
   }
 
   function spawnCar(kind, x, z, yaw, opts = {}) {
+    // Seeded paint (G.rng); Math.random only as a fallback when this module
+    // runs standalone without the game context (same pattern as crew.js).
+    const paintDraw = G.rng ? G.rng.next() : Math.random();
     const colorHex = opts.color !== undefined ? opts.color
       : kind === 'police' ? 0x1a2a44
       : kind === 'taxi' ? 0xf0c040
-      : CIVIL_COLORS[Math.floor(Math.random() * CIVIL_COLORS.length)];
-    const { mesh, wheels, lightBar, bodyMat } = buildMesh(kind, colorHex);
+      : CIVIL_COLORS[Math.floor(paintDraw * CIVIL_COLORS.length)];
+    const { mesh, wheels, lightBar, bodyMat, tailMat, indL, indR } = buildMesh(kind, colorHex);
     mesh.position.set(x, 0, z);
     mesh.rotation.y = yaw;
     scene.add(mesh);
     const car = {
       id: nextId++,
-      kind, mesh, wheels, lightBar, bodyMat, color: colorHex,
+      kind, mesh, wheels, lightBar, bodyMat, tailMat, indL, indR, color: colorHex,
       pos: new THREE.Vector3(x, 0, z),
       vel: new THREE.Vector3(),
       yaw, speed: 0, steer: 0,
@@ -99,6 +118,7 @@ export function createVehicles(G) {
       driver: opts.driver || null, // 'player' | 'traffic' | 'police' | 'scripted' | null (parked)
       lightsOn: kind === 'police',
       wrecked: false, smokeT: 0, skidT: 0, lastHitBy: null,
+      braking: false, indicator: null, // 'left' | 'right' | null
     };
     cars.push(car);
     return car;
@@ -134,6 +154,17 @@ export function createVehicles(G) {
     return Math.max(-1, Math.min(1, -cross * 2.4));
   }
 
+  // A hard crash smashes nearby street furniture. Hydrants burst into a
+  // geyser; lamps and trees topple (props handles the visuals + colliders).
+  function smashFurniture(car, crashSpeed) {
+    if (!G.props || crashSpeed < 6) return;
+    const knocked = G.props.knockAt(car.pos.x, car.pos.z, 3.2);
+    for (const k of knocked) {
+      if (k.type === 'hydrant' && G.effects) G.effects.geyser(k.x, k.z);
+      if (G.effects) G.effects.burst({ x: k.x, y: 0.8, z: k.z }, 0xffcc66, 5, 3);
+    }
+  }
+
   // One physics step for one car. throttle in [-1, 1], steer in [-1, 1].
   function driveCar(car, dt, throttle, steer, handbrake) {
     if (car.wrecked) {
@@ -155,6 +186,9 @@ export function createVehicles(G) {
       fSpeed -= fSpeed * 0.35 * dt;
     }
     fSpeed = Math.max(-CAR_MAX_REVERSE, Math.min(car.maxSpeed, fSpeed));
+    // Braking = throttle negative while still moving forward.
+    car.braking = throttle < 0 && fSpeed > 0.5;
+    car.tailMat.color.setHex(car.braking ? 0xff7777 : 0xff2222);
     // Steering: sharper at low speed, reversed when reversing.
     const steerAuthority = Math.min(1, Math.abs(fSpeed) / 8);
     car.yaw += steer * CAR_STEER * dt * steerAuthority * (fSpeed >= 0 ? 1 : -1);
@@ -197,6 +231,7 @@ export function createVehicles(G) {
       if (G.audio) G.audio.crash(crashSpeed);
       if (G.effects) G.effects.burst({ x: car.pos.x, y: 0.8, z: car.pos.z }, 0xffcc66, 6, 4);
       emit('crash', { x: car.pos.x, z: car.pos.z, strength: crashSpeed });
+      smashFurniture(car, crashSpeed);
     }
 
     // Car-vs-car: soft circle push.
@@ -331,11 +366,15 @@ export function createVehicles(G) {
     }
     // Police light bars flash at 6 Hz.
     const flash = Math.floor(clock * 6) % 2 === 0;
+    // Indicators blink at 1.5 Hz.
+    const indOn = Math.floor(clock * 1.5) % 2 === 0;
     for (const car of cars) {
       if (car.lightBar && car.lightsOn) {
         car.lightBar.children[0].visible = flash;
         car.lightBar.children[1].visible = !flash;
       }
+      car.indL.visible = car.indicator === 'left' && indOn;
+      car.indR.visible = car.indicator === 'right' && indOn;
     }
   }
 
