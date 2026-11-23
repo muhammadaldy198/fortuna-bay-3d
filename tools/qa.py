@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""QA runner for FORTUNA BAY 3D — smoke, systems test, soak, screenshots.
+"""QA runner for FORTUNA BAY 3D v2 — smoke, systems test, soak, screenshots.
 
 Usage: python3 tools/qa.py [--port 8901] [--soak 20] [--shots-dir DIR]
        python3 tools/qa.py --capture-shots DIR [--port 8901]
@@ -7,7 +7,10 @@ Serves game/ with the kit's serve.ts, drives it with Playwright, and
 reports console errors, external requests, systems-test results and
 soak results. --capture-shots captures the 4 ?shot= scenes as JPEGs
 (1280x720, q80) into DIR and checks the gate caps (<=256 KiB each,
-long side <=1280, short side >=480). Exits non-zero if anything fails.
+long side <=1280, short side >=480) AND that FALCON-1 is actually in
+frame (projected heli position inside the camera frustum) — the v1
+shots never showed the heli, and that must not happen again.
+Exits non-zero if anything fails.
 
 Screenshot note: page.screenshot() HANGS in this VM's headless Chromium
 (both with SwiftShader flags and with defaults — the compositor never
@@ -25,7 +28,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENTRY = os.path.dirname(HERE)
 NODE = os.path.expanduser("~/workspace/office/tools/node-v22.23.4-linux-x64/bin/node")
-SCENES = ["cover", "city", "chase", "mission"]
+SCENES = ["strip", "night", "chase", "scale"]
 
 from playwright.sync_api import sync_playwright  # noqa: E402
 
@@ -90,6 +93,21 @@ def capture(page, path, fmt="jpeg", quality=80):
     return os.path.getsize(path)
 
 
+def heli_in_frame(page):
+    """Project the heli's world position through the camera. Returns
+    (in_frame, ndc_x, ndc_y): NDC in [-1, 1] with z < 1 means visible."""
+    try:
+        return page.evaluate("""() => {
+            const G = window.__game;
+            if (!G || !G.police || !G.police.heli) return [false, 0, 0, 'no-heli'];
+            const v = G.police.heli.group.position.clone().project(G.camera);
+            const inFrame = v.z < 1 && v.x >= -1 && v.x <= 1 && v.y >= -1 && v.y <= 1;
+            return [inFrame, +v.x.toFixed(2), +v.y.toFixed(2), G.police.heli.mode];
+        }""")
+    except Exception as e:
+        return [False, 0, 0, f"eval-error: {e}"]
+
+
 def report(prefix, collector, extra=""):
     print(f"[{prefix}]{extra} errors={len(collector.errors)} external={len(collector.external)} failed={len(collector.failed)}")
     for e in collector.errors[:5]:
@@ -134,6 +152,8 @@ def test_systems(browser, base):
         page.wait_for_function("!!window.__systemsTest", timeout=30000)
         res = page.evaluate("window.__systemsTest")
         print(f"[systems] ok={res['ok']} errors={res['errors']}")
+        # The destructibleDown check is the v2 addition: the knock must
+        # register in props.downCount(), not just in knockAt's return value.
         for k, v in res["checks"].items():
             print(f"   {'PASS' if v else 'FAIL'} {k}")
         ok = res["ok"] and not res["errors"] and not c.errors
@@ -176,6 +196,8 @@ def capture_shots(browser, base, out_dir):
             ok = False
             page.close()
             continue
+        in_frame, nx, ny, mode = heli_in_frame(page)
+        title_hidden = not page.is_visible("#title")
         path = os.path.join(out_dir, f"{i}-{scene}.jpg")
         size = capture(page, path, fmt="jpeg", quality=80)
         dims = "?"
@@ -188,10 +210,10 @@ def capture_shots(browser, base, out_dir):
         except Exception:
             pass
         size_ok = size <= 262144
-        print(f"[shot:{scene}] {os.path.basename(path)} {size} bytes {dims} size_ok={size_ok} dim_ok={dim_ok} errors={len(c.errors)}")
+        print(f"[shot:{scene}] {os.path.basename(path)} {size} bytes {dims} size_ok={size_ok} dim_ok={dim_ok} heli_in_frame={in_frame} ndc=({nx},{ny}) mode={mode} title_hidden={title_hidden} errors={len(c.errors)}")
         for e in c.errors[:3]:
             print("   ERR", e)
-        if not size_ok or not dim_ok or c.errors:
+        if not size_ok or not dim_ok or c.errors or not in_frame or not title_hidden:
             ok = False
         page.close()
     return ok
