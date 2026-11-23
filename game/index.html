@@ -1,95 +1,37 @@
-<!-- Fortuna Bay 3D v2 — GTA 6-inspired open-world crime sandbox. Shot mode:
-     open ?shot=<strip|night|chase|scale>&seed=1 for the four capture shots
-     (see shots.json at the entry root). -->
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Fortuna Bay 3D — a sun-soaked open-world beach city game. Drive, chase, and climb the ranks of Isla Fortuna. Photo mode, a day/night cycle, and FALCON-1 overhead.">
-<title>Fortuna Bay 3D</title>
-    <meta name="theme-color" content="#101018">
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ff9a3c'/%3E%3Ctext x='16' y='23' font-size='18' font-family='sans-serif' font-weight='bold' text-anchor='middle' fill='%23101018'%3EFB%3C/text%3E%3C/svg%3E">
+<title>Fortuna Bay — Open-World Crime Game</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: #101018; font-family: Arial, Helvetica, sans-serif; color: #fff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b1026; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #eef1f5; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-  .hidden { display: none !important; }
-
-  /* ---- HUD ---- */
-  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
-  .panel { background: rgba(10, 10, 18, 0.55); border-radius: 8px; padding: 8px 12px; }
-  #top-right { position: absolute; top: 12px; right: 12px; text-align: right; }
-  #cash { font-size: 26px; font-weight: bold; color: #7dd87d; }
-  #stars { font-size: 34px; letter-spacing: 4px; color: #888; line-height: 1.1; }
-  #stars.wanted-hot { color: #ffd23c; text-shadow: 0 0 12px rgba(255, 210, 60, 0.8); }
-  #stars.wanted-searching { color: #ffe08a; text-shadow: 0 0 10px rgba(255, 224, 138, 0.7); }
-  #stars.wanted-escaping { color: #ff9a3c; text-shadow: 0 0 10px rgba(255, 154, 60, 0.7); }
-  #wanted-state { font-size: 13px; font-weight: bold; letter-spacing: 2px; }
-  #wanted-state.wanted-hot { color: #ffd23c; }
-  #wanted-state.wanted-searching { color: #ffe08a; }
-  #wanted-state.wanted-escaping { color: #ff9a3c; }
-  #district { font-size: 15px; color: #ddd; }
-  #clock { font-size: 20px; font-weight: bold; }
-  #capture-bar { position: absolute; top: 150px; left: 50%; transform: translateX(-50%); width: 300px; text-align: center; }
-  #capture-text { font-size: 14px; font-weight: bold; letter-spacing: 2px; color: #fff2b0; text-shadow: 0 2px 6px rgba(0,0,0,0.9); margin-bottom: 4px; }
-  #capture-track { height: 12px; background: rgba(255,255,255,0.2); border-radius: 6px; overflow: hidden; }
-  #capture-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #fff2b0, #ffd23c); }
-  #capture-fill.urgent { background: linear-gradient(90deg, #ff6a6a, #ff2222); animation: healthPulse 0.5s infinite; }
-  #top-left { position: absolute; top: 12px; left: 12px; }
-  #health-bar { width: 220px; height: 16px; background: rgba(255,255,255,0.2); border-radius: 8px; overflow: hidden; }
-  #health-fill { height: 100%; width: 100%; background: linear-gradient(90deg, #4ad04a, #7dd87d); transition: width 0.2s; }
-  #health-fill.low { background: linear-gradient(90deg, #d03a3a, #ff6a6a); animation: healthPulse 0.8s infinite; }
-  @keyframes healthPulse { 50% { opacity: 0.55; } }
-  #health-text { font-size: 14px; margin-top: 2px; }
-  #mission-banner { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); text-align: center; max-width: 520px; }
-  #mission-title { font-size: 20px; font-weight: bold; color: #ffd76b; }
-  #mission-text { font-size: 16px; }
-  #mission-timer { font-size: 24px; font-weight: bold; color: #ff8a8a; }
-  #mission-timer.urgent { color: #ff2222; animation: timerPulse 0.5s infinite; }
-  @keyframes timerPulse { 50% { transform: scale(1.15); } }
-  #minimap { position: absolute; left: 12px; bottom: 12px; width: 200px; height: 200px; border-radius: 50%; border: 3px solid rgba(255,255,255,0.35); background: #16324a; }
-  #bottom-right { position: absolute; right: 12px; bottom: 12px; text-align: right; }
-  #speed-box { font-size: 30px; font-weight: bold; }
-  #speed-box small { font-size: 14px; color: #ccc; }
-  #weapon-name { font-size: 18px; font-weight: bold; margin-top: 4px; }
-  #weapon-slots { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
-  .weapon-slot { font-size: 12px; padding: 3px 7px; border-radius: 4px; background: rgba(255,255,255,0.12); color: #ccc; }
-  .weapon-slot.active { background: #ffd76b; color: #111; font-weight: bold; }
-  #crew { font-size: 13px; color: #ccc; margin-top: 4px; }
-  #toast { position: absolute; right: 12px; top: 150px; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
-  .toast-item { background: rgba(10,10,18,0.75); border-left: 4px solid #44d0ff; padding: 8px 12px; border-radius: 6px; font-size: 15px; transition: opacity 0.4s; }
-  .toast-item.fade { opacity: 0; }
-  #prompt { position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%); font-size: 17px; font-weight: bold; background: rgba(10,10,18,0.7); padding: 8px 16px; border-radius: 8px; }
-  #crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 28px; color: rgba(255,255,255,0.85); text-shadow: 0 0 4px #000; }
-  #damage { position: absolute; inset: 0; pointer-events: none; opacity: 0; background: radial-gradient(ellipse at center, transparent 55%, rgba(200,0,0,0.55) 100%); }
-  #banner-big { position: absolute; top: 32%; left: 50%; transform: translate(-50%, -50%); text-align: center; }
-  #banner-big-text { font-size: 52px; font-weight: bold; letter-spacing: 2px; text-shadow: 0 4px 24px rgba(0,0,0,0.8); }
-  #banner-big-sub { font-size: 20px; color: #ffd76b; text-shadow: 0 2px 8px rgba(0,0,0,0.8); }
-  #help { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); font-size: 13px; color: #ddd; background: rgba(10,10,18,0.55); padding: 6px 12px; border-radius: 6px; white-space: nowrap; }
-  #fullmap-wrap { position: absolute; inset: 0; background: rgba(5,5,12,0.85); display: flex; align-items: center; justify-content: center; z-index: 20; }
-  #fullmap { border: 3px solid rgba(255,255,255,0.4); border-radius: 8px; }
-  /* Photo mode rule-of-thirds grid (outside #hud so it stays visible). */
-  #photo-grid { position: fixed; inset: 0; pointer-events: none; z-index: 15; }
-  #photo-grid::before, #photo-grid::after { content: ''; position: absolute; background: rgba(255,255,255,0.5); }
-  #photo-grid::before { left: 33.33%; top: 0; width: 1px; height: 100%; box-shadow: 33.33vw 0 0 rgba(255,255,255,0.5); }
-  #photo-grid::after { top: 33.33%; left: 0; height: 1px; width: 100%; box-shadow: 0 33.33vh 0 rgba(255,255,255,0.5); }
-  #photo-hint { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); font-size: 13px; color: #fff; background: rgba(10,10,18,0.6); padding: 6px 12px; border-radius: 6px; pointer-events: none; z-index: 15; white-space: nowrap; }
-
-  /* ---- Title & pause ---- */
-  .screen { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center; background: linear-gradient(180deg, rgba(20,20,40,0.55), rgba(20,10,20,0.85)); text-align: center; }
-  .logo { font-size: 72px; font-weight: bold; letter-spacing: 4px; text-shadow: 0 6px 30px rgba(0,0,0,0.9); }
-  .logo span { color: #ffb36b; }
-  .tagline { font-size: 20px; color: #ffd76b; margin: 8px 0 28px; }
-  .btn { pointer-events: auto; cursor: pointer; font-size: 20px; font-weight: bold; padding: 12px 36px; margin: 6px; border: none; border-radius: 8px; background: #ffb36b; color: #1a1a1a; }
-  .btn:hover { background: #ffc98a; }
-  .btn.secondary { background: rgba(255,255,255,0.18); color: #fff; }
-  .btn.secondary:hover { background: rgba(255,255,255,0.3); }
-  #title-save { font-size: 15px; color: #ccc; margin-top: 10px; }
-  .controls { font-size: 14px; color: #ccc; margin-top: 24px; line-height: 1.9; }
-  .controls b { color: #fff; }
-  #pause-stats { font-size: 17px; color: #ffd76b; margin: 12px 0 20px; }
-  .row { display: flex; gap: 8px; }
+  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  #hud { position: fixed; inset: 0; pointer-events: none; }
+  #health-wrap { position: absolute; top: 16px; left: 16px; width: 220px; }
+  #health-bar { height: 12px; background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.35); border-radius: 6px; overflow: hidden; }
+  #health-fill { height: 100%; width: 100%; background: linear-gradient(90deg, #2ecc71, #27ae60); transition: width 0.2s; }
+  #health-text { font-size: 12px; margin-top: 2px; color: #cfe3d8; text-shadow: 1px 1px 2px #000; }
+  #money { position: absolute; top: 14px; right: 18px; font-size: 26px; font-weight: 700; color: #7be495; text-shadow: 2px 2px 3px #000; }
+  #stars { position: absolute; top: 48px; right: 18px; font-size: 24px; letter-spacing: 2px; color: #ffd23f; text-shadow: 2px 2px 3px #000; }
+  #district { position: absolute; top: 84px; right: 18px; font-size: 13px; color: #cfd8e3; text-shadow: 1px 1px 2px #000; }
+  #speed { position: absolute; bottom: 18px; right: 18px; font-size: 22px; font-weight: 600; color: #fff; text-shadow: 2px 2px 3px #000; }
+  #objective { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); font-size: 15px; background: rgba(0,0,0,0.55); padding: 8px 16px; border-radius: 8px; max-width: 60%; text-align: center; }
+  #message { position: absolute; bottom: 190px; left: 18px; font-size: 14px; background: rgba(0,0,0,0.6); padding: 8px 12px; border-radius: 6px; opacity: 0; transition: opacity 0.4s; max-width: 320px; }
+  #banner { position: absolute; top: 34%; left: 50%; transform: translateX(-50%); font-size: 44px; font-weight: 800; letter-spacing: 1px; color: #fff; text-shadow: 0 0 18px rgba(255,46,136,0.8), 3px 3px 4px #000; opacity: 0; transition: opacity 0.4s; text-align: center; white-space: nowrap; }
+  #minimap { position: absolute; bottom: 16px; left: 16px; width: 168px; height: 168px; border: 2px solid rgba(255,255,255,0.5); border-radius: 50%; background: rgba(10,14,20,0.85); }
+  #help { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 12px; color: rgba(255,255,255,0.75); background: rgba(0,0,0,0.45); padding: 6px 12px; border-radius: 6px; text-align: center; }
+  #damage-flash { position: fixed; inset: 0; background: radial-gradient(ellipse at center, transparent 55%, rgba(255,0,0,0.55) 100%); opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+  #photo-hint { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 13px; background: rgba(0,0,0,0.65); padding: 8px 14px; border-radius: 6px; display: none; }
+  .screen { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; background: linear-gradient(180deg, rgba(11,16,38,0.88), rgba(255,46,136,0.22) 70%, rgba(11,16,38,0.92)); text-align: center; z-index: 10; }
+  .screen h1 { font-size: 72px; font-weight: 900; letter-spacing: 4px; background: linear-gradient(90deg, #ffd23f, #ff2e88, #22d3ee); -webkit-background-clip: text; background-clip: text; color: transparent; text-shadow: none; }
+  .screen h2 { font-size: 20px; font-weight: 400; color: #cfd8e3; margin-top: 6px; letter-spacing: 2px; }
+  .screen .keys { margin-top: 28px; font-size: 14px; line-height: 1.9; color: #e8ecf2; background: rgba(0,0,0,0.45); padding: 14px 26px; border-radius: 10px; }
+  .screen .start { margin-top: 26px; font-size: 18px; font-weight: 700; color: #ffd23f; animation: pulse 1.6s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+  #final-score { margin-top: 14px; font-size: 20px; color: #7be495; }
 </style>
 <script type="importmap">
 { "imports": { "three": "./vendor/three.module.min.js" } }
@@ -97,76 +39,50 @@
 </head>
 <body>
 <canvas id="game"></canvas>
-<div id="status" aria-live="polite" style="position:absolute;left:-9999px"></div>
-<div id="photo-grid" class="hidden"></div>
-<div id="photo-hint" class="hidden">Photo mode — WASD move · Q/E down/up · Mouse orbit · Scroll zoom · G grid · O/Esc exit</div>
+<div id="status" aria-live="polite"></div>
 
-<div id="hud" class="hidden">
-  <div id="top-left" class="panel">
+<div id="hud">
+  <div id="health-wrap">
     <div id="health-bar"><div id="health-fill"></div></div>
     <div id="health-text">100</div>
   </div>
-  <div id="top-right" class="panel">
-    <div id="cash">$250</div>
-    <div id="stars">☆☆☆☆☆</div>
-    <div id="wanted-state"></div>
-    <div id="district">Fortuna Bay</div>
-    <div id="clock">17:30</div>
+  <div id="money">$250</div>
+  <div id="stars">☆☆☆☆☆</div>
+  <div id="district">Downtown</div>
+  <div id="speed"></div>
+  <div id="objective">Fortuna Bay — press Enter for the next job.</div>
+  <div id="message"></div>
+  <div id="banner"></div>
+  <canvas id="minimap" width="168" height="168"></canvas>
+  <div id="help">WASD move/drive &middot; Shift sprint &middot; E enter car &middot; F punch &middot; Click shoot &middot; C camera &middot; P photo &middot; M mute &middot; Esc pause</div>
+</div>
+<div id="damage-flash"></div>
+<div id="photo-hint">Photo mode — WASD fly, mouse look, R/F rise/sink, C filter, P/Esc exit</div>
+
+<div id="title-screen" class="screen">
+  <h1>FORTUNA BAY</h1>
+  <h2>AN OPEN-WORLD CRIME GAME &middot; SUN, SEA &amp; SIRENS</h2>
+  <div class="keys">
+    WASD / arrows — move &amp; drive &nbsp;&middot;&nbsp; Shift — sprint / boost<br>
+    E — enter or exit a car &nbsp;&middot;&nbsp; F — punch &nbsp;&middot;&nbsp; Click — shoot<br>
+    C — camera &nbsp;&middot;&nbsp; P — photo mode &nbsp;&middot;&nbsp; M — mute &nbsp;&middot;&nbsp; Esc — pause<br>
+    Steal cars, lose the cops, run the jobs. Bank it all.
   </div>
-  <div id="capture-bar" class="hidden">
-    <div id="capture-text">IN THE SPOTLIGHT</div>
-    <div id="capture-track"><div id="capture-fill"></div></div>
-  </div>
-  <div id="mission-banner" class="panel hidden">
-    <div id="mission-title"></div>
-    <div id="mission-text"></div>
-    <div id="mission-timer" class="hidden"></div>
-  </div>
-  <canvas id="minimap" width="200" height="200"></canvas>
-  <div id="bottom-right" class="panel">
-    <div id="speed-box" class="hidden"><span id="speed">0</span> <small>km/h</small></div>
-    <div id="weapon-name">Pistol</div>
-    <div id="weapon-slots"></div>
-    <div id="crew"></div>
-  </div>
-  <div id="toast"></div>
-  <div id="prompt" class="hidden"></div>
-  <div id="crosshair" class="hidden">+</div>
-  <div id="damage"></div>
-  <div id="banner-big" class="hidden">
-    <div id="banner-big-text"></div>
-    <div id="banner-big-sub"></div>
-  </div>
-  <div id="help">WASD drive/walk · E enter car · M mission · Tab map · R radio · Z/X/C crew · G garage · O photo mode · Right-click aim</div>
-  <div id="fullmap-wrap" class="hidden"><canvas id="fullmap" width="720" height="720"></canvas></div>
+  <div class="start">PRESS ENTER OR CLICK TO START</div>
 </div>
 
-<div id="title" class="screen">
-  <div class="logo">FORTUNA <span>BAY</span> 3D</div>
-  <div class="tagline">Isla Fortuna — sun, sea, and the fastest way to the top.</div>
-  <button id="btn-play" class="btn">PLAY</button>
-  <button id="btn-continue" class="btn secondary" style="display:none">CONTINUE</button>
-  <div id="title-save"></div>
-  <div class="controls">
-    <b>WASD</b> drive / walk &nbsp;·&nbsp; <b>E</b> enter car &nbsp;·&nbsp; <b>M</b> mission &nbsp;·&nbsp; <b>1–5 / Q</b> weapons<br>
-    <b>Mouse</b> look &nbsp;·&nbsp; <b>Click</b> shoot &nbsp;·&nbsp; <b>Right-click</b> aim &nbsp;·&nbsp; <b>Space</b> handbrake<br>
-    <b>Tab</b> map &nbsp;·&nbsp; <b>R</b> radio &nbsp;·&nbsp; <b>Z / X / C</b> crew &nbsp;·&nbsp; <b>G</b> garage &nbsp;·&nbsp; <b>O</b> photo mode &nbsp;·&nbsp; <b>Esc</b> pause
-  </div>
+<div id="pause-screen" class="screen">
+  <h1>PAUSED</h1>
+  <h2>Progress saved.</h2>
+  <div class="start">PRESS ESC TO RESUME</div>
 </div>
 
-<div id="pause" class="screen hidden">
-  <div class="logo" style="font-size:48px">PAUSED</div>
-  <div id="pause-stats"></div>
-  <button id="btn-resume" class="btn">RESUME</button>
-  <button id="btn-restart" class="btn secondary">RESTART (new game)</button>
-  <div class="row" style="margin-top:16px">
-    <button id="btn-taxi" class="btn secondary">TAXI JOB</button>
-    <button id="btn-courier" class="btn secondary">COURIER JOB</button>
-    <button id="btn-race" class="btn secondary">STREET RACE</button>
-  </div>
+<div id="over-screen" class="screen">
+  <h1>WASTED</h1>
+  <div id="final-score"></div>
+  <div class="start">PRESS ENTER TO TRY AGAIN</div>
 </div>
 
-<noscript><div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#101018;z-index:99">Fortuna Bay 3D needs JavaScript to run.</div></noscript>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>
