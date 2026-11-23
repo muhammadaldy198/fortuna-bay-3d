@@ -1,74 +1,104 @@
-// Crew abilities for Fortuna Bay — three specialists on hotkeys with
-// cooldowns. Rico repairs the car, Vex drops a wanted star, Lola sends the
-// cops chasing a decoy. v2: Lola's decoy fools FALCON-1 too — the heli
-// tracks the ghost, so the player can slip out of the searchlight.
-// Time note: the decoy expiry is WALL-CLOCK (performance.now), because the
-// police check it against wall-clock too — mixing it with simulation time
-// would make the decoy last forever while paused.
-import { CREW } from './config.js';
+// The crew: two companions who follow the player on foot, shoot at the
+// player's enemies, and talk. Ghost can run a decoy — a distraction across
+// town that pulls a star of heat off the player (one minute cooldown).
+// They are people, not icons: names, lines, and a reason to keep them alive.
 
-const DECOY_SECONDS = 20; // how long Lola's ghost draws the cops (and the heli)
+import * as THREE from 'three';
 
+const CREW_DEFS = [
+  { name: 'Maya', callsign: 'Wrench', color: 0x8e44ad, line: 'Maya: I got your back. Drive.' },
+  { name: 'Dito', callsign: 'Ghost', color: 0x16a085, line: 'Dito: Cops are mine. Go dark.' },
+];
+
+/**
+ * Create the crew for world G. Returns:
+ * - members — the companion objects
+ * - decoy() — pull one star of heat (60 s cooldown), or false if cooling down
+ * - update(dt)
+ */
 export function createCrew(G) {
-  const { state, emit } = G;
-  const cooldowns = { rico: 0, vex: 0, lola: 0 };
+  const members = [];
+  let decoyCooldown = 0;
 
-  // Seeded draw when the game provides its rng (main.js does), so the decoy
-  // direction is reproducible for a given seed; Math.random only as a
-  // fallback when this module is used standalone in a test.
-  function draw() {
-    return G.rng ? G.rng.next() : Math.random();
+  for (const def of CREW_DEFS) {
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.7, 1.0, 0.45),
+      new THREE.MeshLambertMaterial({ color: def.color }),
+    );
+    body.position.y = 1.05;
+    const head = new THREE.Mesh(
+      new THREE.SphereGeometry(0.27, 10, 8),
+      new THREE.MeshLambertMaterial({ color: 0xe8b88a }),
+    );
+    head.position.y = 1.85;
+    group.add(body, head);
+    const spot = G.city.randomRoadPoint(G.rng.fork(def.name.length * 7 + 1));
+    group.position.set(spot.x, 0, spot.z);
+    G.scene.add(group);
+    members.push({
+      ...def,
+      pos: group.position,
+      mesh: group,
+      speed: 7.5,
+      shootCooldown: 2,
+      following: true,
+    });
   }
 
-  function use(key) {
-    const def = CREW[key];
-    if (!def) return false;
-    if (cooldowns[key] > 0) {
-      emit('toast', { text: `${def.name} is not ready yet (${Math.ceil(cooldowns[key])}s)` });
-      return false;
-    }
-    if (key === 'rico') {
-      if (!state.inCar || !state.car) {
-        emit('toast', { text: 'Rico needs you in a car' });
-        return false;
-      }
-      state.car.hp = 100;
-      state.car.wrecked = false;
-      if (G.effects) G.effects.burst({ x: state.car.pos.x, y: 1, z: state.car.pos.z }, 0x66ffaa, 20, 4);
-      emit('toast', { text: 'Rico repaired your car' });
-    } else if (key === 'vex') {
-      if (state.wanted <= 0) {
-        emit('toast', { text: 'Vex: no heat to clear' });
-        return false;
-      }
-      G.police.setWanted(state.wanted - 1);
-      emit('toast', { text: 'Vex scrubbed a wanted star' });
-    } else if (key === 'lola') {
-      const pp = state.inCar && state.car ? state.car.pos : G.player.pos;
-      const a = draw() * Math.PI * 2;
-      // Clamp the ghost onto the island: a decoy in the sea would send the
-      // cops (and the heli) chasing a point no road reaches.
-      const clamp = (v) => Math.max(-500, Math.min(500, v));
-      state.decoy = {
-        x: clamp(pp.x + Math.sin(a) * 120),
-        z: clamp(pp.z + Math.cos(a) * 120),
-        until: performance.now() / 1000 + DECOY_SECONDS,
-      };
-      emit('toast', { text: 'Lola sent the cops — and the heli — chasing a ghost' });
-    }
-    cooldowns[key] = def.cooldown;
+  function decoy() {
+    if (decoyCooldown > 0) return false;
+    if (G.wanted <= 0) return false;
+    decoyCooldown = 60;
+    G.police.setWanted(G.wanted - 1);
+    if (G.hud) G.hud.message('Dito: decoy lit across town — heat is off you.');
     return true;
   }
 
   function update(dt) {
-    for (const key of Object.keys(cooldowns)) {
-      if (cooldowns[key] > 0) cooldowns[key] = Math.max(0, cooldowns[key] - dt);
-    }
-    // The decoy expires on wall-clock (see the note at the top).
-    if (state.decoy && performance.now() / 1000 > state.decoy.until) {
-      state.decoy = null;
+    decoyCooldown = Math.max(0, decoyCooldown - dt);
+    for (const member of members) {
+      if (!member.following) continue;
+      const dx = G.player.pos.x - member.pos.x;
+      const dz = G.player.pos.z - member.pos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 6) {
+        const step = Math.min(dist - 4, member.speed * dt);
+        member.pos.x += (dx / dist) * step;
+        member.pos.z += (dz / dist) * step;
+        member.mesh.rotation.y = Math.atan2(dx, dz);
+      }
+      // Shoot the nearest enemy in range.
+      member.shootCooldown -= dt;
+      if (member.shootCooldown <= 0 && G.combat.enemies.length > 0) {
+        let best = null;
+        let bestDist = 45;
+        for (const enemy of G.combat.enemies) {
+          const d = Math.hypot(enemy.pos.x - member.pos.x, enemy.pos.z - member.pos.z);
+          if (d < bestDist) {
+            bestDist = d;
+            best = enemy;
+          }
+        }
+        if (best) {
+          member.shootCooldown = 2.2;
+          best.health -= 17;
+          if (G.effects) {
+            G.effects.tracer(
+              { x: member.pos.x, y: 1.4, z: member.pos.z },
+              { x: best.pos.x, y: 1.2, z: best.pos.z },
+            );
+          }
+          if (best.health <= 0) {
+            G.scene.remove(best.mesh);
+            G.combat.enemies.splice(G.combat.enemies.indexOf(best), 1);
+            G.money += 50;
+            if (G.hud) G.hud.message(`${member.name}: target down. +$50`);
+          }
+        }
+      }
     }
   }
 
-  return { cooldowns, use, update };
+  return { members, decoy, update };
 }
