@@ -1,8 +1,10 @@
-// Buildings for Fortuna Bay — three InstancedMeshes, three draw calls:
+// Buildings for Fortuna Bay v2 — three InstancedMeshes, three draw calls:
 // coloured boxes, flat roofs, and thousands of window quads (lit warm or
 // dark glass). Windows are real quads on the facades, so they stay
 // proportional on a 6 m villa and a 120 m tower alike. The Fortuna Tower
-// gets an antenna and a blinking beacon.
+// gets an antenna and a blinking beacon. v2: setNight() brightens the lit
+// windows by intensity (no extra lights — the cheap-night trick), so the
+// night shot glows without costing a single draw call.
 import * as THREE from 'three';
 import { WINDOW_LIT } from './config.js';
 import { hash2 } from './random.js';
@@ -72,17 +74,32 @@ export function createBuildings(scene, city) {
     acs.setMatrixAt(i, dummy.matrix);
   });
   acs.instanceMatrix.needsUpdate = true;
+  // Hide the unused slot when no building got an AC unit: an uninitialised
+  // instance matrix would otherwise park a grey box at the world origin.
+  acs.count = acList.length;
   scene.add(acs);
 
   // Windows: quads on the two long faces of each building. A window is lit
   // warm with probability 0.42 (hash2, so it never flickers between loads).
+  // litFlags remembers which are lit so setNight() can brighten only those.
   const winGeo = new THREE.PlaneGeometry(1.5, 1.1);
   const winMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
   const windows = new THREE.InstancedMesh(winGeo, winMat, MAX_WINDOWS);
+  const litFlags = new Uint8Array(MAX_WINDOWS);
   let winCount = 0;
   const litColor = new THREE.Color(WINDOW_LIT);
+  const litNight = new THREE.Color(0xffc860).multiplyScalar(1.5);
   const darkColor = new THREE.Color(0x2a3550);
+  const darkNight = new THREE.Color(0x1a2238);
+  // One place that knows a window's colour: lit windows glow warm (brighter
+  // at night), dark windows are deep glass. Used by the build loop and by
+  // setNight() alike, so the two can never drift apart.
+  function windowColor(lit, night, out) {
+    if (lit) return out.copy(litColor).lerp(litNight, night);
+    return out.copy(darkColor).lerp(darkNight, night);
+  }
   for (const b of buildings) {
+    if (winCount >= MAX_WINDOWS) break; // cap reached: stop scanning floors
     const bays = Math.max(1, Math.floor(b.w / 4));
     const floorH = b.h / b.floors;
     for (let fl = 0; fl < b.floors; fl++) {
@@ -103,7 +120,8 @@ export function createBuildings(scene, city) {
           dummy.scale.set(1, 1, 1);
           dummy.updateMatrix();
           windows.setMatrixAt(winCount, dummy.matrix);
-          windows.setColorAt(winCount, lit ? litColor : darkColor);
+          windows.setColorAt(winCount, windowColor(lit, 0, color));
+          litFlags[winCount] = lit ? 1 : 0;
           winCount++;
         }
       }
@@ -129,9 +147,24 @@ export function createBuildings(scene, city) {
   beacon.position.set(tower.x, towerH + 18.5, tower.z);
   scene.add(beacon);
 
+  let nightLevel = 0;
+  const tmpColor = new THREE.Color();
+
   return {
     windowCount: winCount,
     buildingCount: buildings.length,
+    // Brighten lit windows as night falls (level 0 = day, 1 = full night).
+    // Only runs when the level actually changes — recolouring ~30k
+    // instances every frame would be wasteful.
+    setNight(level) {
+      const clamped = Math.max(0, Math.min(1, level));
+      if (Math.abs(clamped - nightLevel) < 0.02) return;
+      nightLevel = clamped;
+      for (let i = 0; i < winCount; i++) {
+        windows.setColorAt(i, windowColor(litFlags[i] === 1, clamped, tmpColor));
+      }
+      if (windows.instanceColor) windows.instanceColor.needsUpdate = true;
+    },
     // The beacon blinks at 1.4 Hz.
     update(t) {
       beacon.visible = Math.sin(t * Math.PI * 2 * 1.4) > -0.2;
