@@ -48,6 +48,8 @@ function resolveFile(pathname: string): string | null {
   return file;
 }
 
+// No SPA fallback: an unknown path is a 404, never index.html — the
+// entry is a static game, and a wrong URL should fail loudly in QA.
 createServer((request, response) => {
   const url = new URL(request.url ?? '/', 'http://localhost');
   let pathname: string;
@@ -77,6 +79,11 @@ createServer((request, response) => {
     'content-length': size,
     'cache-control': 'no-store',
   });
+  // HEAD gets the headers and no body.
+  if (request.method === 'HEAD') {
+    response.end();
+    return;
+  }
   createReadStream(file).pipe(response);
 }).listen(port, '127.0.0.1', () => {
   console.log(`game/ is on http://localhost:${port}`);
