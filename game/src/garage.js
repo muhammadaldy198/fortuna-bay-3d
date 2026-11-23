@@ -1,9 +1,11 @@
 // Garage + safehouse for Fortuna Bay — store cars, respray, upgrade the
 // engine, heal up and save at the Safehouse. The zone is a 16 m radius
 // around the safehouse; actions are triggered by keys (main.js) and the
-// prompt text tells the player what is available right now.
+// prompt text tells the player what is available right now. The respray
+// colour comes from the seeded stream, so a save/load round-trip never
+// changes the paint job.
 export function createGarage(G) {
-  const { city, state, emit } = G;
+  const { city, state, rng, emit } = G;
   const safe = city.landmarks.safehouse;
   const ZONE_RADIUS = 16;
   const RESPRAY_COST = 50;
@@ -45,7 +47,9 @@ export function createGarage(G) {
     state.inCar = false;
     state.car = null;
     if (G.player) {
-      G.player.setPos(safe.x + 4, safe.z + 4, Math.PI);
+      // Step out east of the safehouse (14 m clears its 14 m footprint —
+      // the old +4 put the player INSIDE the building).
+      G.player.setPos(safe.x + 14, safe.z, Math.PI);
       G.player.group.visible = true;
     }
     if (G.audio) G.audio.setEngine(false, 0);
@@ -57,7 +61,8 @@ export function createGarage(G) {
   function takeOut() {
     if (!inZone() || state.inCar || state.garage.length === 0) return false;
     const stored = state.garage.shift();
-    const car = G.vehicles.spawnCar(stored.kind, safe.x + 6, safe.z + 6, Math.PI, {
+    // Park it east of the safehouse, clear of the 14 m footprint.
+    const car = G.vehicles.spawnCar(stored.kind, safe.x + 14, safe.z + 2, Math.PI, {
       driver: null, color: stored.color,
     });
     car.upgrades = stored.upgrades || 0;
@@ -74,8 +79,10 @@ export function createGarage(G) {
       return false;
     }
     state.cash -= RESPRAY_COST;
+    // A fixed palette (not a random hex): the colour is chosen from the
+    // seeded stream, so a save/load round-trip never changes the paint job.
     const palette = [0xc84444, 0x4488c8, 0xe8e8e8, 0x44a868, 0xd8a83c, 0x8855aa, 0x333333, 0xe88a4a];
-    const newColor = palette[Math.floor(Math.random() * palette.length)];
+    const newColor = palette[Math.floor(rng.next() * palette.length)];
     state.car.color = newColor;
     if (state.car.bodyMat) state.car.bodyMat.color.setHex(newColor);
     emit('toast', { text: 'Resprayed — fresh paint!' });
