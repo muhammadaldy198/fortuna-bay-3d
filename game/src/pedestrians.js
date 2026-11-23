@@ -1,269 +1,100 @@
-// Pedestrians for Fortuna Bay v2 — walkers on the sidewalks who flee
-// gunfire and chases, call the police when they witness a crime, and go down
-// when a car hits them. v2: they cower under FALCON-1's rotor wash and run
-// out of its searchlight pool. Rendered as four InstancedMeshes (torso,
-// head, two legs) so 40+ peds cost four draw calls.
+// Pedestrians: walkers on the sidewalks, drawn as two instanced meshes
+// (bodies, heads) with a shirt colour each. They stroll along the roads,
+// turn at intersections, and run when the heat is on — a high wanted level
+// or a gunshot nearby sends them fleeing from the player.
+
 import * as THREE from 'three';
-import { HELI, PED_COUNT, PED_FLEE_SPEED, PED_SPEED } from './config.js';
+import { POPULATION } from './config.js';
 
-const SHIRT_COLORS = [0xc84444, 0x4488c8, 0x44a868, 0xd8a83c, 0x8855aa, 0xe8e8e8, 0xe88a4a, 0x4ad0d0];
-const SKIN_COLORS = [0xc89878, 0x8a5a3a, 0xe8b898, 0x6a4030];
+const SHIRTS = [0xe74c3c, 0x3498db, 0x2ecc71, 0xf39c12, 0x9b59b6, 0x1abc9c, 0xe67e22, 0xecf0f1];
+const SKINS = [0xe8b88a, 0xc68642, 0x8d5524, 0xf1c27d];
 
-export function createPeds(G) {
-  const { scene, city, rng, state, emit, on } = G;
-  const peds = [];
-
-  for (let i = 0; i < PED_COUNT; i++) {
-    const [x, z] = city.randomSidewalkPoint(rng);
-    const [wx, wz] = city.randomSidewalkPoint(rng);
-    peds.push({
-      x, z,
-      dir: rng.next() * Math.PI * 2,
-      wx, wz, // current waypoint
-      speed: PED_SPEED * rng.range(0.8, 1.25),
-      state: 'walk',
-      stateT: 0,
-      phase: rng.next() * Math.PI * 2,
-      shirt: SHIRT_COLORS[i % SHIRT_COLORS.length],
-      skin: SKIN_COLORS[i % SKIN_COLORS.length],
-      called: false, // has this ped already called the police?
-      callT: 0,
-      fleeX: 0, fleeZ: 0,
-    });
-  }
-
-  // Four instanced body parts.
+/**
+ * Create the pedestrian system for world G. Returns { list, update(dt) }.
+ * Each pedestrian is { pos, heading, speed, road, dir, fleeing }.
+ */
+export function createPedestrians(G) {
+  const rng = G.rng.fork(505);
+  const list = [];
   const dummy = new THREE.Object3D();
   const color = new THREE.Color();
-  const torsoGeo = new THREE.BoxGeometry(0.5, 0.7, 0.3);
-  const torsoMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-  const torsos = new THREE.InstancedMesh(torsoGeo, torsoMat, PED_COUNT);
-  const headGeo = new THREE.BoxGeometry(0.32, 0.32, 0.32);
-  const headMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-  const heads = new THREE.InstancedMesh(headGeo, headMat, PED_COUNT);
-  const legGeo = new THREE.BoxGeometry(0.18, 0.7, 0.18);
-  const legMat = new THREE.MeshLambertMaterial({ color: 0x2a3a5a });
-  const legL = new THREE.InstancedMesh(legGeo, legMat, PED_COUNT);
-  const legR = new THREE.InstancedMesh(legGeo, legMat, PED_COUNT);
-  for (const m of [torsos, heads, legL, legR]) {
-    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    m.frustumCulled = false;
-    scene.add(m);
-  }
-  peds.forEach((p, i) => {
-    torsos.setColorAt(i, color.setHex(p.shirt));
-    heads.setColorAt(i, color.setHex(p.skin));
-  });
-  if (torsos.instanceColor) torsos.instanceColor.needsUpdate = true;
-  if (heads.instanceColor) heads.instanceColor.needsUpdate = true;
 
-  function playerPos() {
-    if (state.inCar && state.car) return state.car.pos;
-    return G.player.pos;
-  }
+  const bodyGeo = new THREE.CylinderGeometry(0.32, 0.38, 1.25, 8);
+  bodyGeo.translate(0, 0.95, 0);
+  const headGeo = new THREE.SphereGeometry(0.26, 10, 8);
+  const bodies = new THREE.InstancedMesh(bodyGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), POPULATION.pedestrians);
+  const heads = new THREE.InstancedMesh(headGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }), POPULATION.pedestrians);
+  bodies.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  heads.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  G.scene.add(bodies);
+  G.scene.add(heads);
 
-  function scare(x, z, radius, kind) {
-    for (const p of peds) {
-      if (p.state === 'down') continue;
-      const d = Math.hypot(p.x - x, p.z - z);
-      if (d > radius) continue;
-      // Flee directly away from the scare.
-      const away = Math.atan2(p.x - x, p.z - z);
-      p.dir = away;
-      p.fleeX = p.x + Math.sin(away) * 30;
-      p.fleeZ = p.z + Math.cos(away) * 30;
-      p.state = 'flee';
-      p.stateT = 4 + rng.next() * 2;
-      // A witness who sees a crime calls the FBPD (once per ped).
-      if ((kind === 'gunshot' || kind === 'carjack') && !p.called && d < 26) {
-        p.called = true;
-        p.callT = 2;
-      }
-    }
+  function spawnPed() {
+    const spot = G.city.randomRoadPoint(rng);
+    const side = rng.chance(0.5) ? 1 : -1;
+    const onXRoad = Math.abs(spot.x - G.city.nearestRoad(spot.x, spot.z).x) < 0.01;
+    const x = onXRoad ? spot.x + side * 9 : spot.x;
+    const z = onXRoad ? spot.z : spot.z + side * 9;
+    return {
+      pos: new THREE.Vector3(x, 0, z),
+      heading: rng.range(0, Math.PI * 2),
+      speed: rng.range(1.2, POPULATION.pedSpeed),
+      shirt: rng.pick(SHIRTS),
+      skin: rng.pick(SKINS),
+      dir: rng.chance(0.5) ? 1 : -1,
+      axis: onXRoad ? 'z' : 'x',
+      fleeing: false,
+      bob: rng.range(0, Math.PI * 2),
+    };
   }
 
-  on('gunshot', (e) => scare(e.x, e.z, 34, 'gunshot'));
-  on('explosion', (e) => scare(e.x, e.z, 60, 'explosion'));
-  on('crash', (e) => { if (e.strength > 8) scare(e.x, e.z, 26, 'crash'); });
-  on('carjack', (e) => scare(e.x, e.z, 26, 'carjack'));
-  // A shot ped goes down (and the shooter earns police attention).
-  on('pedShot', (e) => {
-    const p = e.ped;
-    if (!p || p.state === 'down') return;
-    p.state = 'down';
-    p.stateT = 12;
-    emit('pedHit', { x: p.x, z: p.z });
-  });
-
-  function respawnNearPlayer(p) {
-    const pp = playerPos();
-    for (let tries = 0; tries < 10; tries++) {
-      const [x, z] = city.randomSidewalkPoint(rng);
-      const d = Math.hypot(x - pp.x, z - pp.z);
-      if (d > 40 && d < 220) {
-        p.x = x;
-        p.z = z;
-        const [wx, wz] = city.randomSidewalkPoint(rng);
-        p.wx = wx;
-        p.wz = wz;
-        p.state = 'walk';
-        p.stateT = 0;
-        p.called = false; // a fresh face on the street can call again
-        return;
-      }
-    }
-    // Fallback: anywhere on a sidewalk.
-    const [x, z] = city.randomSidewalkPoint(rng);
-    p.x = x;
-    p.z = z;
-    p.state = 'walk';
-    p.called = false;
-  }
-
-  // True when a ped stands in the heli's rotor wash: low heli, close by.
-  function underWash(p, heli) {
-    return !!heli && heli.alt < 40
-      && Math.hypot(p.x - heli.x, p.z - heli.z) < HELI.WASH_RADIUS;
-  }
+  for (let i = 0; i < POPULATION.pedestrians; i += 1) list.push(spawnPed());
 
   function update(dt) {
-    const pp = playerPos();
-    // Heli context (v2): peds cower under the rotor wash and flee the
-    // searchlight pool. Both reads are guarded — police may not exist yet.
-    const heli = G.police && G.police.heliPos ? G.police.heliPos() : null;
-    const pool = G.police && G.police.spotPool ? G.police.spotPool() : null;
-    for (const p of peds) {
-      // A witness finishing the call reports the crime.
-      if (p.callT > 0) {
-        p.callT -= dt;
-        if (p.callT <= 0) emit('witness', { x: p.x, z: p.z });
-      }
-      if (p.state === 'down') {
-        p.stateT -= dt;
-        if (p.stateT <= 0) respawnNearPlayer(p);
-        continue;
-      }
-      // Cars knock peds down.
-      if (G.vehicles) {
-        for (const car of G.vehicles.cars) {
-          if (car.wrecked || car.speed < 4) continue;
-          const d = Math.hypot(p.x - car.pos.x, p.z - car.pos.z);
-          if (d < 1.9) {
-            p.state = 'down';
-            p.stateT = 12;
-            if (car.driver === 'player') emit('pedHit', { x: p.x, z: p.z });
-            break;
-          }
-        }
-        if (p.state === 'down') continue;
-      }
-      // Rotor wash: a low heli overhead makes nearby peds cower in place.
-      // The state re-checks every frame — a ped that was cowering stands
-      // back up the moment the heli climbs or moves on.
-      if (underWash(p, heli) && p.state !== 'flee') {
-        p.state = 'cower';
-        p.stateT = 0.5;
-      } else if (p.state === 'cower') {
-        p.state = 'walk';
-      }
-      // Searchlight pool: standing in the beam makes a ped run for cover.
-      if (pool && p.state !== 'flee' && p.state !== 'cower') {
-        const dPool = Math.hypot(p.x - pool.x, p.z - pool.z);
-        if (dPool < pool.r) {
-          const away = Math.atan2(p.x - pool.x, p.z - pool.z);
-          p.dir = away;
-          p.fleeX = p.x + Math.sin(away) * 30;
-          p.fleeZ = p.z + Math.cos(away) * 30;
-          p.state = 'flee';
-          p.stateT = 3 + rng.next() * 2;
+    const shotsRecent = G.combat && G.frame - G.combat.shotsFiredAt < 300;
+    const scary = G.wanted >= 3 || shotsRecent;
+    for (let i = 0; i < list.length; i += 1) {
+      const ped = list[i];
+      const dx = ped.pos.x - G.player.pos.x;
+      const dz = ped.pos.z - G.player.pos.z;
+      const distToPlayer = Math.hypot(dx, dz);
+      ped.fleeing = scary && distToPlayer < 60;
+      if (ped.fleeing) {
+        ped.heading = Math.atan2(dx, dz);
+        ped.pos.x += Math.sin(ped.heading) * 5.5 * dt;
+        ped.pos.z += Math.cos(ped.heading) * 5.5 * dt;
+      } else {
+        // Stroll along the sidewalk; turn at the block's end.
+        ped.pos.x += Math.sin(ped.heading) * ped.speed * dt;
+        ped.pos.z += Math.cos(ped.heading) * ped.speed * dt;
+        if (rng.chance(0.002)) ped.heading += rng.chance(0.5) ? Math.PI / 2 : -Math.PI / 2;
+        if (Math.abs(ped.pos.x) > G.city.bounds - 10 || Math.abs(ped.pos.z) > G.city.bounds - 10) {
+          ped.heading += Math.PI;
         }
       }
-      let targetSpeed = p.speed;
-      let tx = p.wx;
-      let tz = p.wz;
-      if (p.state === 'flee') {
-        targetSpeed = PED_FLEE_SPEED;
-        tx = p.fleeX;
-        tz = p.fleeZ;
-        p.stateT -= dt;
-        if (p.stateT <= 0) {
-          p.state = 'walk';
-          const [wx, wz] = city.randomSidewalkPoint(rng);
-          p.wx = wx;
-          p.wz = wz;
-        }
-      } else if (p.state === 'cower') {
-        targetSpeed = 0;
-        tx = p.x;
-        tz = p.z;
-        p.stateT -= dt;
-        if (p.stateT <= 0 && !underWash(p, heli)) {
-          p.state = 'walk';
-        } else if (p.stateT <= 0) {
-          p.stateT = 0.5; // still under the wash: keep cowering
-        }
-      }
-      const dx = tx - p.x;
-      const dz = tz - p.z;
-      const d = Math.hypot(dx, dz);
-      if (d < 2) {
-        if (p.state === 'walk') {
-          const [wx, wz] = city.randomSidewalkPoint(rng);
-          p.wx = wx;
-          p.wz = wz;
-        } else if (p.state === 'flee') {
-          p.fleeX = p.x + Math.sin(p.dir) * 30;
-          p.fleeZ = p.z + Math.cos(p.dir) * 30;
-        }
-      } else if (targetSpeed > 0) {
-        const wantDir = Math.atan2(dx / d, dz / d);
-        let diff = wantDir - p.dir;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        p.dir += diff * Math.min(1, dt * 6);
-        p.x += Math.sin(p.dir) * targetSpeed * dt;
-        p.z += Math.cos(p.dir) * targetSpeed * dt;
-        [p.x, p.z] = city.collideCircle(p.x, p.z, 0.4);
-        p.phase += dt * targetSpeed * 2.4;
-      }
-      // Far from the player: recycle near the action.
-      if (Math.hypot(p.x - pp.x, p.z - pp.z) > 320) respawnNearPlayer(p);
-    }
-
-    // Write the four instanced meshes.
-    peds.forEach((p, i) => {
-      const down = p.state === 'down';
-      const cower = p.state === 'cower';
-      const swing = (down || cower) ? 0 : Math.sin(p.phase) * 0.5;
-      const bob = (down || cower) ? 0 : Math.abs(Math.sin(p.phase)) * 0.05;
-      // Torso: standing 1.05, cowering 0.7 (crouched), down 0.35 (flat).
-      dummy.position.set(p.x, down ? 0.35 : cower ? 0.7 : 1.05 + bob, p.z);
-      dummy.rotation.set(down ? Math.PI / 2 : cower ? 0.5 : 0, p.dir, 0);
+      const bound = G.city.bounds - 4;
+      ped.pos.x = Math.max(-bound, Math.min(bound, ped.pos.x));
+      ped.pos.z = Math.max(-bound, Math.min(bound, ped.pos.z));
+      ped.bob += dt * (ped.fleeing ? 14 : 7);
+      const hop = Math.abs(Math.sin(ped.bob)) * 0.08;
+      dummy.position.set(ped.pos.x, hop, ped.pos.z);
+      dummy.rotation.set(0, ped.heading, 0);
       dummy.scale.set(1, 1, 1);
       dummy.updateMatrix();
-      torsos.setMatrixAt(i, dummy.matrix);
-      // Head.
-      dummy.position.set(p.x + (down ? Math.sin(p.dir) * 0.5 : 0), down ? 0.3 : cower ? 1.05 : 1.62 + bob, p.z + (down ? Math.cos(p.dir) * 0.5 : 0));
-      dummy.rotation.set(down ? Math.PI / 2 : cower ? 0.5 : 0, p.dir, 0);
+      bodies.setMatrixAt(i, dummy.matrix);
+      color.setHex(ped.shirt);
+      bodies.setColorAt(i, color);
+      dummy.position.y = 1.72 + hop;
       dummy.updateMatrix();
       heads.setMatrixAt(i, dummy.matrix);
-      // Legs swing against each other; cowering bends them.
-      for (const [mesh, side, phase] of [[legL, -0.14, swing], [legR, 0.14, -swing]]) {
-        dummy.position.set(
-          p.x + Math.cos(p.dir) * side,
-          down ? 0.25 : cower ? 0.35 : 0.45 + bob,
-          p.z - Math.sin(p.dir) * side,
-        );
-        dummy.rotation.set(down ? Math.PI / 2 : cower ? 1.1 : phase, p.dir, 0);
-        dummy.updateMatrix();
-        mesh.setMatrixAt(i, dummy.matrix);
-      }
-    });
-    torsos.instanceMatrix.needsUpdate = true;
+      color.setHex(ped.skin);
+      heads.setColorAt(i, color);
+    }
+    bodies.instanceMatrix.needsUpdate = true;
     heads.instanceMatrix.needsUpdate = true;
-    legL.instanceMatrix.needsUpdate = true;
-    legR.instanceMatrix.needsUpdate = true;
+    if (bodies.instanceColor) bodies.instanceColor.needsUpdate = true;
+    if (heads.instanceColor) heads.instanceColor.needsUpdate = true;
   }
 
-  return { peds, update };
+  return { list, update };
 }
