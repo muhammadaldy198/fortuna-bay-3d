@@ -1,11 +1,13 @@
-// FORTUNA BAY 3D — boot and the one loop. The world advances in fixed
+// FORTUNA BAY 3D v2 — boot and the one loop. The world advances in fixed
 // 1/60 s steps; the renderer paints what is there. Screens: title, play,
-// pause. ?seed=N fixes the city. ?shot=cover|city|chase|mission|soak|
+// pause. ?seed=N fixes the city. ?shot=strip|night|chase|scale|soak|
 // systemstest stages a scene and sets window.__shotReady (or
-// __soakDone / __systemsTest) for the capture tool.
+// __soakDone / __systemsTest) for the capture tool. ?time=HH:MM pins the
+// clock, ?weather=golden-hour|night|rain sets the light, ?wanted=N sets
+// the heat (manual photo sessions; shot stages set their own).
 import * as THREE from 'three';
 import {
-  AMBIENT, BUSTED_FINE, FOG_COLOR, FOG_FAR, FOG_NEAR, HALF, ISLAND,
+  AMBIENT, BUSTED_FINE, FOG_COLOR, FOG_FAR, FOG_NEAR, ISLAND,
   MINUTES_PER_SECOND, MISSION_COUNT, PACKAGE_VALUE, PLAYER_HEALTH,
   RESPAWN_FEE, SEA, SKY_HORIZON, SKY_TOP, START_CASH, STEP, SUN_COLOR,
   SUN_POS, TIME_START, districtAtPos,
@@ -29,9 +31,10 @@ import { createWeather } from './weather.js';
 import { createHUD } from './hud.js';
 import { createMinimap } from './minimap.js';
 import { createInput } from './input.js';
+import { createPhoto } from './photo.js';
 import { createShots } from './shots.js';
 import { makeGroundTexture, makeOceanTexture } from './textures.js';
-import { clearSave, defaultSave, loadSave, writeSave } from './save.js';
+import { clearSave, loadSave, writeSave } from './save.js';
 
 const MAX_FRAME = 0.25;
 const MAX_STEPS = 8;
@@ -120,6 +123,7 @@ const state = {
   bestRace: null,
   packages: [],
   timeMin: TIME_START,
+  heliEscapes: 0,
 };
 
 // ---- World -------------------------------------------------------------------
@@ -141,9 +145,15 @@ ocean.position.y = -0.4;
 scene.add(ocean);
 
 // ---- Context -----------------------------------------------------------------
+// G.rng is the ONE seeded stream the whole game shares: city gen, traffic,
+// ped spawns, mission picks, respray colours and the crew decoy all draw
+// from it, so a fixed ?seed= replays the same world. Modules that need
+// randomness must use G.rng (or the rng passed to them), never Math.random,
+// except live combat spread / particle jitter, which is cosmetic.
 const G = {
   scene, camera, renderer, city, rng, state, emit, on, sun, sky,
   fpsAvg: 60,
+  shotMode: SHOT_MODE, // staging: the bust outcomes are disabled (police.js)
 };
 Object.defineProperty(G, 'errorCount', { get() { return errorCount; } });
 Object.defineProperty(G, 'districtName', {
@@ -187,6 +197,8 @@ const weather = createWeather(G);
 G.weather = weather;
 const minimap = createMinimap(G);
 G.minimap = minimap;
+const photo = createPhoto(G);
+G.photo = photo;
 
 // Hidden packages: spinning cyan cubes at the city spots.
 const packageMeshes = new Map();
@@ -212,7 +224,7 @@ function saveGame() {
   const pp = state.inCar && state.car ? state.car.pos : player.pos;
   const yaw = state.inCar && state.car ? state.car.yaw : player.yaw;
   writeSave({
-    version: 1,
+    version: 2,
     cash: state.cash,
     respect: state.respect,
     missionsDone: state.missionsDone,
@@ -223,6 +235,8 @@ function saveGame() {
     radio: state.radio,
     bestRace: state.bestRace,
     packages: state.packages,
+    photoGrid: photo.grid,
+    heliEscapes: state.heliEscapes,
   });
 }
 G.saveGame = saveGame;
@@ -237,6 +251,8 @@ function applySave(data) {
   state.radio = data.radio || 0;
   state.bestRace = data.bestRace ?? null;
   state.packages = data.packages || [];
+  state.heliEscapes = data.heliEscapes || 0;
+  photo.setGrid(!!data.photoGrid);
   if (data.pos) player.setPos(data.pos.x, data.pos.z, data.pos.yaw);
   for (const id of state.packages) {
     const mesh = packageMeshes.get(id);
@@ -259,10 +275,12 @@ function resetState() {
   state.inCar = false;
   state.car = null;
   state.radio = 0;
+  state.radioOn = false; // a fresh game starts silent until PLAY starts it
   state.decoy = null;
   state.bestRace = null;
   state.packages = [];
   state.timeMin = TIME_START;
+  state.heliEscapes = 0;
   player.setPos(0, 300, Math.PI);
   player.group.visible = true;
 }
@@ -359,7 +377,16 @@ function handleKeys() {
     if (input.pressed('Escape') || input.pressed('KeyP') || input.pressed('Enter')) resumeGame();
     return;
   }
-  // Play screen.
+  // Play screen. Photo mode owns the keys while it is active: Esc/O exits
+  // it, everything else goes to the drone (handled in photo.update).
+  if (photo.active) {
+    if (input.pressed('Escape') || input.pressed('KeyO')) photo.toggle();
+    return;
+  }
+  if (input.pressed('KeyO')) {
+    photo.toggle();
+    return;
+  }
   if (input.pressed('Escape') || input.pressed('KeyP')) {
     pauseGame();
     return;
@@ -404,8 +431,10 @@ function step(dt) {
   simT += dt;
   if (playing) state.timeMin += dt * MINUTES_PER_SECOND;
 
-  player.update(dt, playing && !state.inCar);
-  if (playing) vehicles.update(dt);
+  player.update(dt, playing && !state.inCar && !photo.active);
+  // Photo mode freezes the PLAYER's inputs (the drone owns them) but the
+  // world keeps simulating: traffic, cops and the heli all keep moving.
+  if (playing && !photo.active) vehicles.update(dt);
   traffic.update(dt);
   peds.update(dt);
   police.update(dt);
@@ -416,8 +445,9 @@ function step(dt) {
   weather.update(dt);
   effects.update(dt);
   buildings.update(simT);
-  props.update(simT);
+  props.update(simT, dt);
   audio.update(dt);
+  if (playing) photo.update(dt);
   if (state.screen !== 'title') {
     minimap.update(dt);
     hud.update(dt);
@@ -441,15 +471,16 @@ function step(dt) {
     }
   }
 
-  // Camera.
+  // Camera: photo mode wins, then the shot staging, then the usual cameras.
   if (state.screen === 'title') {
     const a = simT * 0.05;
     camera.position.set(Math.cos(a) * 220, 130, Math.sin(a) * 220 + 60);
     camera.lookAt(0, 10, 0);
   } else if (state.screen === 'play') {
-    if (shots.cameraFn) shots.cameraFn(camera, dt);
+    if (photo.active) photo.updateCamera(camera);
+    else if (shots.cameraFn) shots.cameraFn(camera, dt);
     else if (state.inCar) vehicles.updateCamera(camera);
-    else player.updateCamera(camera);
+    else player.updateCamera(camera, dt);
   }
   // Ocean scroll.
   oceanTex.offset.x += dt * 0.004;
@@ -494,6 +525,28 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden && state.screen === 'play' && !SHOT_MODE) pauseGame();
 });
 
+// ---- URL flags (manual photo sessions only — shot stages set their own) ----
+function applyUrlFlags() {
+  const timeParam = params.get('time');
+  if (timeParam) {
+    const [hh, mm] = timeParam.split(':').map(Number);
+    if (Number.isFinite(hh) && Number.isFinite(mm)) {
+      state.timeMin = (hh % 24) * 60 + (mm % 60);
+      weather.setTimeOfDay(hh + mm / 60);
+    }
+  }
+  const weatherParam = params.get('weather');
+  if (weatherParam === 'night') weather.setTimeOfDay(22);
+  else if (weatherParam === 'golden-hour') weather.setTimeOfDay(19.33);
+  else if (weatherParam === 'rain') weather.setMode('rain');
+  else if (weatherParam === 'morning') weather.setTimeOfDay(10);
+  const wantedParam = params.get('wanted');
+  if (wantedParam !== null) {
+    const w = Number(wantedParam);
+    if (Number.isFinite(w)) police.setWanted(Math.max(0, Math.min(5, Math.round(w))));
+  }
+}
+
 // ---- Boot ----------------------------------------------------------------------------
 window.__game = G;
 if (SHOT_MODE) {
@@ -505,8 +558,9 @@ if (SHOT_MODE) {
   shots.stage(SHOT, params);
 } else {
   const saveText = savedGame
-    ? `Continue — $${savedGame.cash} · ${savedGame.missionsDone.length}/10 missions`
+    ? `Continue — $${savedGame.cash} · ${savedGame.missionsDone.length}/11 missions`
     : '';
   hud.showTitle(!!savedGame, saveText);
+  applyUrlFlags();
 }
 requestAnimationFrame(frame);
